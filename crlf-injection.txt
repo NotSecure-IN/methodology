@@ -1,0 +1,2284 @@
+# CRLF INJECTION — ULTIMATE ADVANCED DETECTION MASTER REFERENCE
+## Advanced Discovery, Sink Analysis, Transformation Intelligence, Protocol Differential Testing, Evidence Validation & Vulnerability Research
+
+**Document classification:** Advanced Offensive Security Research  
+**Primary weaknesses:** CWE-113, CWE-93, CWE-117  
+**Adjacent weaknesses:** CWE-444, HTTP Request Smuggling, HTTP Response Splitting  
+**Testing authorization:** Systems owned by the tester or explicitly authorized targets only  
+**Primary objective:** Discover, validate and document previously unknown CRLF injection vulnerabilities in web applications and their supporting infrastructure.
+
+---
+
+# PART I — ADVANCED DETECTION PRINCIPLES
+
+## 1. THE COMPLETE CRLF VULNERABILITY MODEL
+
+A CRLF vulnerability should be investigated as a complete source-to-sink data-flow problem.
+
+The fundamental conditions are:
+
+1. SOURCE: Attacker-controlled input enters the application.
+2. TRANSFORMATION: The input passes through one or more decoding, normalization, encoding or conversion operations.
+3. PROPAGATION: The transformed value reaches a protocol-sensitive operation.
+4. SERIALIZATION: The value is incorporated into a serialized message.
+5. STRUCTURAL INTERPRETATION: A downstream parser interprets the resulting bytes as protocol structure.
+6. SECURITY CONSEQUENCE: The structural change produces an identifiable security effect.
+
+Represent the complete chain as:
+
+ATTACKER INPUT
+    |
+    v
+INPUT PARSER
+    |
+    v
+DECODING / CANONICALIZATION
+    |
+    v
+APPLICATION VALIDATION
+    |
+    v
+BUSINESS LOGIC
+    |
+    v
+DATA PROPAGATION
+    |
+    v
+PROTOCOL FIELD CONSTRUCTION
+    |
+    v
+SERIALIZATION
+    |
+    v
+WIRE REPRESENTATION
+    |
+    v
+DOWNSTREAM PARSER
+    |
+    v
+STRUCTURAL INTERPRETATION
+    |
+    v
+SECURITY CONSEQUENCE
+
+A vulnerability is not confirmed merely because an application accepts a newline-containing input.
+
+The investigation must establish which component interprets the resulting data and whether that interpretation changes protocol structure.
+
+## 2. ADVANCED SOURCE DISCOVERY
+
+Do not restrict source discovery to query parameters.
+
+Identify every externally influenced input category.
+
+### 2.1 URL-based sources
+
+- Query parameters
+- Path parameters
+- Path segments
+- URL fragments where application-side processing is relevant
+- Redirect destinations
+- Return URLs
+- Callback URLs
+- Pagination parameters
+- Search parameters
+- Language and locale parameters
+- Filename parameters
+- Import URLs
+- Resource identifiers
+- Encoded route parameters
+
+Note: Browser fragments are normally not transmitted in HTTP requests. Investigate them only when client-side code subsequently sends their contents to a server.
+
+### 2.2 Request-based sources
+
+- Custom request headers
+- Referer
+- Origin
+- User-Agent
+- Accept-Language
+- Forwarded
+- X-Forwarded-Host
+- X-Forwarded-For
+- X-Original-URL
+- X-Rewrite-URL
+- Custom authentication headers
+- API-specific metadata headers
+
+Only investigate headers that are actually accepted and processed by the target.
+
+### 2.3 Body-based sources
+
+- JSON properties
+- XML elements
+- XML attributes
+- Form-urlencoded fields
+- Multipart field names
+- Multipart filenames
+- Multipart Content-Type parameters
+- GraphQL variables
+- SOAP parameters
+- File metadata
+- Imported document metadata
+- User-generated content
+
+### 2.4 Stateful sources
+
+Investigate values that persist between requests:
+
+- User profile fields
+- Display names
+- Email addresses
+- Organization names
+- Saved redirect URLs
+- Notification preferences
+- Uploaded filenames
+- Webhook configurations
+- API integration settings
+- Template configurations
+- Stored application metadata
+
+A value stored in one workflow may reach a header serializer in an entirely different workflow.
+
+### 2.5 Indirect sources
+
+Investigate data originating from:
+
+- External APIs
+- Webhooks
+- OAuth identity providers
+- SSO providers
+- URL preview services
+- File conversion services
+- Image processing services
+- Notification providers
+- Background workers
+- Message queues
+- Third-party integrations
+
+**Advanced discovery principle:** The attacker does not necessarily need to control the final request parameter directly. It is sufficient to influence a value that eventually reaches a protocol-sensitive sink.
+
+---
+
+# PART II — SINK DISCOVERY
+
+## 3. COMPLETE PROTOCOL SINK INVENTORY
+
+The most important improvement over ordinary CRLF testing is identifying the actual serialization sink.
+
+### 3.1 HTTP response-header sinks
+
+Investigate application-controlled construction of:
+
+- Location
+- Set-Cookie
+- Content-Disposition
+- Content-Type
+- Link
+- Refresh
+- WWW-Authenticate
+- Authentication-Info
+- Access-Control-Allow-Origin
+- Access-Control-Expose-Headers
+- Content-Security-Policy
+- Strict-Transport-Security
+- Cache-Control
+- Vary
+- Custom application headers
+
+Do not assume all fields have equivalent impact.
+
+Investigate:
+
+1. Whether the field value is attacker-influenced.
+2. Whether the framework validates it.
+3. Whether the application uses a standard header API.
+4. Whether the application bypasses the normal serializer.
+5. Whether the final response contains an independently created field.
+
+### 3.2 HTTP request-header sinks
+
+Investigate server-generated outbound requests.
+
+Potential locations:
+
+- Webhook delivery
+- API integrations
+- URL preview generation
+- Image retrieval
+- PDF generation
+- Import-from-URL
+- Internal service communication
+- Authentication callbacks
+- Proxy endpoints
+- Metadata retrieval
+
+Determine whether attacker-controlled data reaches:
+
+- Outbound Host
+- Custom request headers
+- Authorization metadata
+- Referer
+- User-Agent
+- Request target
+- Other serialized request fields
+
+Keep outbound testing within explicitly authorized infrastructure and controlled destinations.
+
+### 3.3 Framework serialization sinks
+
+Investigate:
+
+- Raw response-writing methods
+- Header-setting methods
+- Redirect helpers
+- Cookie helpers
+- Middleware response modification
+- Response interceptors
+- Template-generated headers
+- Custom protocol encoders
+- Framework adapters
+- Third-party HTTP libraries
+
+### 3.4 Non-HTTP sinks
+
+Maintain separate detection profiles for:
+
+- SMTP headers
+- MIME part headers
+- SSE event fields
+- Structured and unstructured logs
+- HAProxy PROXY protocol V1
+- FTP command lines
+- IMAP command construction
+- Other line-oriented internal protocols
+
+Do not report a non-HTTP sink as HTTP response-header injection.
+
+---
+
+# PART III — ADVANCED TRANSFORMATION ANALYSIS
+
+## 4. MULTI-STAGE TRANSFORMATION DISCOVERY
+
+The most valuable advanced approach is reconstructing the exact transformation chain.
+
+A payload may pass through:
+
+- URL decoding
+- Form decoding
+- JSON parsing
+- XML entity decoding
+- Unicode normalization
+- Character-set conversion
+- HTML entity decoding
+- Base64 decoding
+- Application-specific decoding
+- Template processing
+- String concatenation
+- Serialization
+
+Investigate each stage independently.
+
+### 4.1 Transformation categories
+
+**Category A — Percent encoding**
+
+- Standard percent encoding
+- Uppercase hexadecimal representation
+- Lowercase hexadecimal representation
+- Repeated percent encoding
+- Mixed encoded and literal characters
+
+**Category B — Character conversion**
+
+- UTF-8 decoding
+- UTF-16 conversion
+- UTF-32 conversion
+- Latin-1 conversion
+- Unicode normalization
+- Invalid-sequence replacement
+- Lossy character conversion
+
+**Category C — Application decoding**
+
+- JSON escape processing
+- XML entity processing
+- Form decoding
+- Framework-specific parameter decoding
+- Custom decoding functions
+- Template transformations
+
+**Category D — Data representation**
+
+- Byte arrays
+- Strings
+- C-style strings
+- Unicode strings
+- Signed and unsigned byte conversions
+- Fixed-width buffers
+- Null-terminated representations
+
+### 4.2 Transformation-depth testing
+
+Establish the expected number of decoding operations.
+
+| Representation | Intended investigation |
+|---|---|
+| %0D | Single decoding |
+| %0A | Single decoding |
+| %0D%0A | CRLF decoding |
+| %250D%250A | Two-stage decoding |
+| %25250D%25250A | Three-stage decoding |
+| Literal CR/LF | Raw input handling |
+
+For every variation, record:
+
+- Original input
+- Input received by the application
+- Decoded application value
+- Value after validation
+- Value passed to the serializer
+- Final serialized representation
+
+Never infer the number of decoding stages from a status code.
+
+### 4.3 Validation-order analysis
+
+Investigate these possible designs:
+
+DESIGN A:
+
+Decode
+  -> Validate
+  -> Serialize
+
+DESIGN B:
+
+Validate
+  -> Decode
+  -> Serialize
+
+DESIGN C:
+
+Decode
+  -> Validate
+  -> Additional transformation
+  -> Serialize
+
+DESIGN D:
+
+Decode
+  -> Validate
+  -> Encode
+  -> Decode again
+  -> Serialize
+
+DESIGN E:
+
+Decode
+  -> Application processing
+  -> Library conversion
+  -> Header construction
+  -> Serialize
+
+Design C, D and E are particularly important when application code and third-party libraries perform different transformations.
+
+The goal is to establish whether prohibited characters can be introduced after validation.
+
+### 4.4 Transformation ledger
+
+Maintain a separate record for each test.
+
+| Stage | Input | Output | Observation |
+|---|---|---|---|
+| Client | Encoded marker | Encoded marker | Baseline |
+| Edge | Encoded marker | Normalized value | Transformation |
+| Framework | Encoded marker | Decoded value | First decode |
+| Validator | Decoded value | Accepted/rejected | Validation |
+| Business logic | Application value | Derived value | Propagation |
+| Serializer | Field value | Serialized bytes | Critical boundary |
+| Downstream | Serialized bytes | Parsed message | Structural result |
+
+A stage that cannot be observed should be explicitly marked UNKNOWN.
+
+Do not fabricate internal processing details based on external responses.
+
+---
+
+# PART IV — ADVANCED PROTOCOL DIFFERENTIAL RESEARCH
+
+## 5. HTTP/1.0 AND HTTP/1.1
+
+Investigate:
+
+- Request-line parsing
+- Header-name parsing
+- Header-value parsing
+- Header termination
+- Response status-line parsing
+- Duplicate field handling
+- Invalid field handling
+- Bare LF handling
+- Bare CR handling
+- CRLF handling
+- Obsolete line folding
+- Connection persistence
+- Response framing
+
+Use harmless unique markers.
+
+Compare:
+
+1. Normal request.
+2. Encoded marker request.
+3. Literal control-character test in an isolated environment.
+4. Different parameter placements.
+5. Different HTTP versions.
+6. Different intermediary paths.
+
+### Important protocol distinction
+
+RFC 9110 states that CR, LF and NUL in HTTP field values are invalid and must be rejected or replaced with spaces before further processing.
+
+RFC 9112 permits recipients to recognize bare LF as a line terminator. A bare CR must be considered invalid or replaced with a space.
+
+Do not treat all three cases as equivalent.
+
+## 6. HTTP/2 DETECTION
+
+HTTP/2 uses binary framing and HPACK compression.
+
+The main research question is not whether HTTP/2 directly accepts arbitrary CRLF in a field value.
+
+It is whether an intermediary incorrectly translates or forwards malformed data into another protocol.
+
+Investigate:
+
+- HTTP/2 termination at the edge
+- HTTP/2-to-HTTP/1.1 translation
+- Header validation before translation
+- Pseudo-header processing
+- Request-target reconstruction
+- Authority reconstruction
+- Duplicate header handling
+- Header normalization
+- Invalid field rejection
+- Error handling during translation
+
+### Pseudo-header research
+
+Examine:
+
+- :method
+- :scheme
+- :authority
+- :path
+- :status
+
+Determine whether the intermediary reconstructs an HTTP/1.1 message safely.
+
+Do not assume that acceptance of a request at the HTTP/2 layer proves that the origin received the same representation.
+
+### HTTP/2 evidence requirements
+
+Capture:
+
+- Negotiated protocol
+- Request representation
+- Edge response
+- Origin-facing protocol where observable
+- Translation behavior
+- Header validation result
+- Final response
+
+RFC 9113 requires HTTP/2 implementations to reject malformed field values containing NUL, LF or CR.
+
+## 7. HTTP/3 AND QUIC
+
+HTTP/3 is another important research surface.
+
+Investigate:
+
+- QUIC transport
+- HTTP/3 field validation
+- QPACK decoding
+- HTTP/3 termination
+- HTTP/3-to-HTTP/2 translation
+- HTTP/3-to-HTTP/1.1 translation
+- Header normalization
+- Pseudo-header reconstruction
+- Error propagation
+- Origin protocol selection
+
+The objective is to identify inconsistencies between the protocol-facing edge and the application-facing origin.
+
+Do not confuse HTTP/3 transport behavior with HTTP/1.1 textual serialization.
+
+## 8. PROXY AND INTERMEDIARY DIFFERENTIALS
+
+Identify every intermediary in the request and response path.
+
+Potential components:
+
+- CDN
+- WAF
+- Load balancer
+- Reverse proxy
+- API gateway
+- Service mesh
+- Application server
+- Internal HTTP client
+- Origin server
+
+For each component, document:
+
+- Product and version, where known
+- Protocol accepted
+- Protocol forwarded
+- Normalization behavior
+- Rejection behavior
+- Header handling
+- Connection reuse behavior
+- Error handling
+
+### Differential comparison matrix
+
+| Edge result | Origin result | Interpretation |
+|---|---|---|
+| Rejected | Not reached | Edge validation |
+| Accepted | Rejected | Origin validation |
+| Normalized | Normalized | Consistent sanitization |
+| Accepted | Modified | Transformation discrepancy |
+| Accepted | Structural change | Investigate further |
+| Unknown | Unknown | Insufficient evidence |
+
+Never infer origin behavior without observing it or reproducing it in an equivalent controlled environment.
+
+---
+
+# PART V — TECHNOLOGY-SPECIFIC DISCOVERY
+
+## 9. NODE.JS
+
+Investigate:
+
+- Built-in HTTP server
+- HTTP client implementations
+- llhttp behavior
+- Response header APIs
+- Raw socket writing
+- Reverse-proxy middleware
+- Redirect middleware
+- Custom response serializers
+- WebSocket handshake libraries
+- Framework adapters
+
+Questions:
+
+1. Does the application use standard header APIs?
+2. Are values validated before being passed to the API?
+3. Is any raw socket operation used?
+4. Does the HTTP client parse upstream responses differently from the edge?
+5. Are library versions affected by known parser vulnerabilities?
+6. Does the application use different behavior in development and production?
+
+Do not generalize the behavior of one Node.js version to all versions.
+
+## 10. JAVA
+
+Investigate:
+
+- Servlet response APIs
+- Spring MVC
+- Spring WebFlux
+- Netty
+- Jetty
+- Tomcat
+- Undertow
+- Apache HttpComponents
+- OkHttp
+- Custom filters
+- Interceptors
+- Response wrappers
+
+High-value research locations:
+
+- Redirect generation
+- Cookie creation
+- Header-setting wrappers
+- Multipart encoding
+- SSE serialization
+- Outbound HTTP requests
+- Custom Netty handlers
+
+## 11. PYTHON
+
+Investigate:
+
+- Django
+- Flask
+- FastAPI
+- Starlette
+- Werkzeug
+- aiohttp
+- httpx
+- Requests
+- h11
+- h2
+- ASGI middleware
+- WSGI middleware
+
+Pay particular attention to:
+
+- Response header construction
+- Framework response objects
+- Redirect utilities
+- Custom middleware
+- Header encoding
+- Outbound request construction
+- HTTP/2 gateway translation
+
+## 12. PHP
+
+Investigate:
+
+- PHP header()
+- setcookie()
+- Header generation in frameworks
+- Symfony HttpFoundation
+- Laravel response helpers
+- WordPress plugins
+- Custom redirect handlers
+- FastCGI communication
+- Reverse-proxy integrations
+
+Identify whether the application uses the framework's normal response mechanisms or constructs raw headers.
+
+## 13. GO
+
+Investigate:
+
+- net/http
+- ResponseWriter
+- Header.Set
+- Header.Add
+- ReverseProxy
+- Custom RoundTripper
+- fasthttp
+- Gin
+- Echo
+- Fiber
+- Custom protocol encoders
+
+Determine whether validation occurs at the application boundary, HTTP library boundary or proxy boundary.
+
+## 14. RUBY
+
+Investigate:
+
+- Rack
+- Rails
+- ActionDispatch
+- WEBrick
+- Puma
+- Thin
+- Faraday
+- Net::HTTP
+- Redirect helpers
+- Cookie serialization
+
+Pay attention to middleware ordering and header construction.
+
+## 15. .NET
+
+Investigate:
+
+- ASP.NET Core
+- Kestrel
+- HttpResponse.Headers
+- HttpClient
+- DelegatingHandler
+- Reverse proxy components
+- IIS integration
+- Middleware
+- Custom response writers
+
+Determine how validation differs between the framework and custom serialization code.
+
+## 16. RUST AND OTHER LANGUAGES
+
+Investigate:
+
+- hyper
+- axum
+- actix-web
+- reqwest
+- httparse
+- Rocket
+- Custom byte serializers
+
+Also investigate:
+
+- C/C++ HTTP libraries
+- Embedded HTTP servers
+- IoT management interfaces
+- Native protocol bridges
+- Custom application gateways
+
+The key principle is to investigate the exact deployed implementation rather than making language-wide vulnerability claims.
+
+---
+
+# PART VI — ADVANCED APPLICATION WORKFLOW DISCOVERY
+
+## 17. BUSINESS-LOGIC-DRIVEN CRLF DETECTION
+
+Conventional scanners frequently miss vulnerabilities because they focus on individual request parameters.
+
+Investigate complete workflows.
+
+### Workflow A — Redirect processing
+
+Trace:
+
+User input
+  -> Redirect validation
+  -> Redirect destination storage
+  -> Response construction
+  -> Location serialization
+
+### Workflow B — File upload
+
+Trace:
+
+Filename
+  -> Multipart parser
+  -> File metadata
+  -> Storage
+  -> Download endpoint
+  -> Content-Disposition generation
+
+### Workflow C — Account management
+
+Trace:
+
+Profile field
+  -> Database
+  -> Account retrieval
+  -> Notification
+  -> Response header or email construction
+
+### Workflow D — Webhook configuration
+
+Trace:
+
+Webhook metadata
+  -> Storage
+  -> Background worker
+  -> Outbound HTTP request
+  -> Request serializer
+
+### Workflow E — OAuth and SSO
+
+Trace:
+
+Callback parameters
+  -> Authentication middleware
+  -> Redirect processing
+  -> Cookie creation
+  -> Response generation
+
+### Workflow F — Notification and email
+
+Trace:
+
+User-controlled metadata
+  -> Template engine
+  -> Email library
+  -> MIME header generation
+  -> Mail transport
+
+### Workflow G — SSE
+
+Trace:
+
+User-controlled data
+  -> Event object
+  -> SSE encoder
+  -> Stream serializer
+  -> Client event parser
+
+### Workflow H — Logging
+
+Trace:
+
+Request input
+  -> Application logging
+  -> Log formatter
+  -> Log transport
+  -> SIEM ingestion
+
+**Advanced principle:** Follow the data across requests, services and background jobs. A vulnerability may exist several processing steps away from the original input.
+
+---
+
+# PART VII — HIGH-COVERAGE TESTING STRATEGY
+
+## 18. SYSTEMATIC TEST MATRIX
+
+Create a test matrix instead of sending random payloads.
+
+### Dimension A — Input location
+
+- Query
+- Path
+- Request header
+- Cookie
+- JSON
+- XML
+- Form
+- Multipart
+- Stored value
+- External API value
+
+### Dimension B — Transformation
+
+- No decoding
+- Single decoding
+- Repeated decoding
+- Unicode conversion
+- Normalization
+- Encoding conversion
+- Custom application transformation
+
+### Dimension C — Sink
+
+- Response header
+- Outbound request header
+- Request target
+- MIME header
+- SSE field
+- Log record
+- Other line-oriented protocol field
+
+### Dimension D — Protocol
+
+- HTTP/1.0
+- HTTP/1.1
+- HTTP/2
+- HTTP/3
+- SMTP
+- MIME
+- SSE
+- WebSocket handshake
+
+### Dimension E — Application behavior
+
+- Reject
+- Strip
+- Replace
+- Encode
+- Preserve
+- Decode
+- Truncate
+- Normalize
+
+### Dimension F — Evidence
+
+- Input accepted
+- Input reflected
+- Sink reached
+- Control character observed
+- New structural field observed
+- Downstream interpretation observed
+- Security impact reproduced
+
+Test each relevant combination independently.
+
+Do not generate an unrestricted Cartesian-product fuzzing campaign. Prioritize combinations supported by evidence of an actual data flow.
+
+## 19. CONTROLLED MARKER STRATEGY
+
+Always start with harmless unique markers.
+
+Example:
+
+X-CRLF-Probe: CRLF-2026-7F31
+
+For authorized HTTP response testing, a canonical encoded marker can be represented as:
+
+%0D%0AX-CRLF-Probe%3A%20CRLF-2026-7F31
+
+Use a different identifier for every candidate parameter.
+
+The marker must not contain:
+
+- Real authentication tokens
+- Real session identifiers
+- Executable scripts
+- External recipient addresses
+- Production user data
+- State-changing instructions
+
+### Marker validation
+
+Determine:
+
+1. Was the marker received?
+2. Was it decoded?
+3. Was it normalized?
+4. Was it reflected?
+5. Did it reach the suspected sink?
+6. Did it become a separate field?
+7. Did a downstream parser interpret it as a separate field?
+
+A marker appearing in the body does not establish CRLF injection.
+
+A marker appearing inside an existing header value does not establish header injection.
+
+A separate, independently parsed field is stronger evidence.
+
+## 20. ADVANCED BASELINE DIFFERENTIAL TESTING
+
+For every candidate:
+
+Capture a baseline response.
+
+Then perform one controlled variation.
+
+Compare:
+
+- Status line
+- Header names
+- Header ordering
+- Duplicate headers
+- Header values
+- Blank-line position
+- Body length
+- Body bytes
+- Redirect behavior
+- Connection behavior
+- Protocol negotiation
+
+Use raw response evidence.
+
+Do not rely exclusively on:
+
+- Browser rendering
+- Pretty-printed response views
+- Scanner severity labels
+- Status codes
+- Application error messages
+
+### Differential interpretation
+
+A meaningful result should identify:
+
+BASELINE:
+No independent test header.
+
+TEST:
+An independent test header appears.
+
+DOWNSTREAM:
+The header is parsed as a separate field.
+
+REPRODUCTION:
+The behavior occurs consistently.
+
+If any of these stages is unknown, document the limitation.
+
+---
+
+# PART VIII — ADVANCED AUTOMATION
+
+## 21. AUTOMATED DISCOVERY ENGINE ARCHITECTURE
+
+A high-quality CRLF detection engine should contain independent modules.
+
+### Module 1 — Target inventory
+
+Input:
+
+- Authorized host list
+- API definitions
+- Endpoint list
+- Application routes
+
+Output:
+
+- Endpoint inventory
+- Parameter inventory
+- Authentication requirements
+- Protocol support
+
+### Module 2 — Input discovery
+
+Identify:
+
+- Query parameters
+- Path variables
+- Headers
+- Cookies
+- JSON fields
+- Multipart fields
+- Stored values
+
+### Module 3 — Sink identification
+
+Identify likely:
+
+- Header setters
+- Redirect functions
+- Cookie constructors
+- Raw response writers
+- Outbound request builders
+- MIME serializers
+- SSE encoders
+- Logging functions
+
+Source-code access provides significantly better sink identification than black-box testing alone.
+
+### Module 4 — Transformation analysis
+
+Record:
+
+- Decoding operations
+- Encoding operations
+- Normalization operations
+- Validation operations
+- Data conversions
+- Operation ordering
+
+### Module 5 — Safe test generation
+
+Generate harmless, unique marker tests based on the discovered source, transformation and sink.
+
+Avoid unnecessary payload permutations.
+
+### Module 6 — Response analysis
+
+Compare:
+
+- Baseline
+- Test response
+- Header structure
+- Raw bytes
+- Protocol metadata
+
+### Module 7 — Evidence correlation
+
+Associate:
+
+- Test identifier
+- Endpoint
+- Parameter
+- Input representation
+- Protocol
+- Suspected sink
+- Response evidence
+- Reproduction result
+
+### Module 8 — Confidence classification
+
+Classify the result as:
+
+- Not vulnerable based on observed evidence
+- Candidate
+- Reflected
+- Sink reachable
+- Structural injection confirmed
+- Security impact confirmed
+- Inconclusive
+
+Do not automatically label an unobservable sink as safe.
+
+---
+
+# PART IX — SOURCE-CODE-ASSISTED DETECTION
+
+## 22. STATIC ANALYSIS APPROACH
+
+When source code is available, use source-to-sink analysis.
+
+### Sources
+
+Search for:
+
+- Request parameters
+- Request headers
+- Cookies
+- Uploaded filenames
+- User profile fields
+- External API responses
+- Webhook metadata
+- Stored application values
+
+### Sinks
+
+Search for:
+
+- Header-setting APIs
+- Raw HTTP response writing
+- Redirect APIs
+- Cookie construction
+- Outbound HTTP header construction
+- MIME header generation
+- SSE serialization
+- Log formatting
+
+### Dangerous data-flow patterns
+
+Investigate:
+
+1. Direct concatenation into header values.
+2. String formatting into raw protocol messages.
+3. Validation before decoding.
+4. Validation followed by another transformation.
+5. Custom serializers without control-character checks.
+6. Unsafe wrappers around otherwise safe framework APIs.
+7. Cross-service propagation into protocol fields.
+8. Inconsistent validation between application and library layers.
+
+### Static-analysis output
+
+For every candidate, generate:
+
+- Source location
+- Transformation sequence
+- Validation location
+- Sink location
+- Relevant function calls
+- Data-flow path
+- Confidence
+- Required dynamic verification
+
+A static-analysis alert is a lead, not proof of exploitation.
+
+## 23. DYNAMIC INSTRUMENTATION
+
+In a controlled environment, instrument:
+
+- Request parsing
+- Parameter decoding
+- Application validation
+- String transformations
+- Header API invocation
+- Serializer invocation
+- Final response generation
+
+Useful observation points:
+
+1. Raw request bytes.
+2. Parsed application value.
+3. Value immediately before validation.
+4. Value immediately after validation.
+5. Value immediately before serialization.
+6. Final serialized message.
+7. Downstream parsed message.
+
+For each observation, preserve the actual byte representation.
+
+Distinguish:
+
+- Unicode character values
+- Encoded string representations
+- Actual byte sequences
+
+Do not assume that a visible textual representation accurately describes the bytes written to the network.
+
+---
+
+# PART X — NON-HTTP PROTOCOL DETECTION
+
+## 24. SMTP AND EMAIL HEADER INJECTION
+
+Investigate:
+
+- Subject
+- From
+- Reply-To
+- To
+- Cc
+- Bcc
+- Custom email headers
+- MIME Content-Type
+- MIME Content-Disposition
+
+Important workflows:
+
+- Password reset
+- Invitation
+- Contact forms
+- Notification delivery
+- Email forwarding
+- Automated reports
+
+Safe validation:
+
+- Use mailboxes controlled by the tester.
+- Use a test mail server where possible.
+- Inspect the serialized message.
+- Verify whether the mail library rejects or neutralizes line breaks.
+- Do not send messages to third parties.
+
+Do not claim password-reset interception unless actual controlled delivery demonstrates it.
+
+## 25. MULTIPART AND MIME INJECTION
+
+Investigate:
+
+- Filename
+- Field name
+- Content-Type parameters
+- Content-Disposition parameters
+- Multipart boundaries
+- Nested MIME structures
+
+Inspect the actual serialized multipart body.
+
+Determine whether an apparent injected field is:
+
+- Part of a quoted parameter
+- Encoded data
+- A separate MIME header
+- A new multipart boundary
+- A malformed message rejected by the recipient
+
+Test only controlled upload and processing workflows.
+
+## 26. SERVER-SENT EVENTS
+
+Investigate:
+
+- event
+- data
+- id
+- retry
+- Comment fields
+- Custom SSE encoders
+- Stored event metadata
+
+SSE uses line-oriented fields and blank-line event termination.
+
+Verify whether the encoder correctly handles newline characters in every attacker-influenced field.
+
+Evidence should establish:
+
+1. The source is attacker-controlled.
+2. The source reaches the SSE encoder.
+3. The encoder does not safely neutralize delimiters.
+4. The resulting stream contains an independently interpreted event.
+5. A controlled receiving client observes the event.
+
+Distinguish event corruption from cross-user event forgery.
+
+## 27. LOG INJECTION
+
+Investigate:
+
+- Access logs
+- Application logs
+- Authentication logs
+- Audit records
+- API gateway logs
+- Reverse-proxy logs
+- SIEM ingestion
+
+Determine whether the logging system:
+
+- Escapes control characters
+- Uses structured records
+- Preserves raw input
+- Treats newlines as record boundaries
+- Parses embedded JSON
+- Performs multiline aggregation
+
+A newline in a log field is not automatically a security-impacting vulnerability.
+
+Prove record manipulation in an authorized test logging environment.
+
+---
+
+# PART XI — BLIND AND INDIRECT DETECTION
+
+## 28. BLIND SINK INVESTIGATION
+
+Some sinks do not produce an immediately visible response.
+
+Examples:
+
+- Asynchronous webhook requests
+- Background email delivery
+- Delayed notification generation
+- Log ingestion
+- Scheduled exports
+- Stored response metadata
+
+Use a unique test identifier to correlate observations.
+
+Potential evidence:
+
+- Controlled server logs
+- Controlled mail server
+- Application tracing
+- Internal test instrumentation
+- Authorized callback observations
+- Queue inspection
+
+Do not treat a missing callback as proof that the application is safe.
+
+Possible explanations include:
+
+- Egress filtering
+- Delayed processing
+- Failed background jobs
+- DNS restrictions
+- Queue failures
+- Validation before delivery
+
+## 29. TIMING AND ERROR DIFFERENTIALS
+
+Timing and errors are secondary evidence.
+
+Compare:
+
+- Baseline response time
+- Harmless marker response time
+- Repeated test response time
+- Error category
+- Response size
+- Connection closure
+- Retry behavior
+
+Control for:
+
+- Network latency
+- Load balancing
+- Cache behavior
+- Application load
+- Background processing
+- Rate limiting
+
+Do not claim CRLF injection based solely on:
+
+- 400 versus 404
+- 200 versus 500
+- Response delay
+- Connection reset
+- Different error pages
+
+These are investigative signals, not structural proof.
+
+---
+
+# PART XII — FALSE-POSITIVE ELIMINATION
+
+## 30. ADVANCED FALSE-POSITIVE CLASSIFICATION
+
+### FP-01: Body reflection
+
+The marker appears in HTML or JSON.
+
+Conclusion: Reflection only.
+
+### FP-02: Encoded header reflection
+
+The marker appears as literal %0D%0A inside an existing header.
+
+Conclusion: No demonstrated delimiter interpretation.
+
+### FP-03: Request-header reflection
+
+The marker appears in a request-related output or debugging interface.
+
+Conclusion: Verify direction and actual sink.
+
+### FP-04: Normal response header
+
+The header existed before testing.
+
+Conclusion: Compare with baseline.
+
+### FP-05: WAF rejection
+
+The request receives a block page.
+
+Conclusion: No proof of origin injection.
+
+### FP-06: Framework rejection
+
+The application rejects the input.
+
+Conclusion: Rejection is not a vulnerability.
+
+### FP-07: Header value modification
+
+The existing value is modified without creating a separate field.
+
+Conclusion: Investigate field semantics separately.
+
+### FP-08: Duplicate header confusion
+
+A duplicate header is observed.
+
+Conclusion: Establish whether the duplicate is attacker-controlled and independently created.
+
+### FP-09: Scanner-only result
+
+An automated tool reports a candidate.
+
+Conclusion: Manual verification required.
+
+### FP-10: Encoding-depth assumption
+
+A multiply encoded value is accepted.
+
+Conclusion: Acceptance does not establish decoding or injection.
+
+### FP-11: Client-side normalization
+
+The browser or HTTP client changes the request before transmission.
+
+Conclusion: Verify the transmitted request.
+
+### FP-12: Intermediary-generated field
+
+A proxy or gateway adds a header independently.
+
+Conclusion: Establish causality before attributing the field to the application.
+
+### FP-13: Header injection without impact
+
+A separate harmless field is confirmed.
+
+Conclusion: Report the primitive accurately; do not assume XSS, ATO or response splitting.
+
+### FP-14: Unobserved origin
+
+The edge response is visible but origin behavior is unknown.
+
+Conclusion: Mark origin interpretation inconclusive.
+
+---
+
+# PART XIII — EVIDENCE AND CONFIDENCE ENGINE
+
+## 31. EVIDENCE LEVELS
+
+Use the following classification.
+
+**E0 — Input acceptance**
+
+Application accepts the supplied input.
+
+**E1 — Reflection**
+
+Input appears in response content.
+
+**E2 — Candidate sink**
+
+Input appears in a suspected header or serialized protocol field.
+
+**E3 — Sink reachability**
+
+The attacker-controlled value demonstrably reaches the relevant serializer.
+
+**E4 — Structural injection**
+
+An independent protocol field or message boundary is demonstrably created.
+
+**E5 — Downstream interpretation**
+
+A separate parser interprets the changed structure.
+
+**E6 — Security consequence**
+
+A reproducible security-relevant effect is established.
+
+E0–E3 are investigation stages, not confirmed structural injection.
+
+E4 establishes structural injection when the evidence is sound.
+
+E5 and E6 establish increasingly strong downstream and impact evidence.
+
+## 32. REPRODUCIBILITY REQUIREMENTS
+
+For each finding:
+
+- Save the baseline.
+- Save the exact test request.
+- Save the raw response.
+- Record the negotiated protocol.
+- Use a unique marker.
+- Repeat the test.
+- Confirm that the result is not cached.
+- Check load-balancer variation.
+- Record the date and environment.
+- Record any authentication requirements.
+
+A strong report should be independently reproducible by the receiving security team.
+
+## 33. CONFIDENCE SCORING
+
+Suggested internal research score:
+
+| Evidence | Points |
+|---|---:|
+| Attacker-controlled source established | 10 |
+| Transformation chain identified | 10 |
+| Sink identified | 15 |
+| Serializer behavior established | 15 |
+| Independent field demonstrated | 20 |
+| Downstream parser interpretation demonstrated | 15 |
+| Reproduction established | 10 |
+| Security consequence demonstrated | 5 |
+
+Maximum: 100.
+
+Interpretation:
+
+- 0–19: Insufficient evidence
+- 20–39: Weak candidate
+- 40–59: Strong investigation lead
+- 60–74: Probable structural issue; additional evidence needed
+- 75–89: Strongly confirmed structural injection
+- 90–100: Strong evidence-backed finding with demonstrated impact
+
+This is an internal investigation aid, not a CVSS score or substitute for technical judgment.
+
+---
+
+# PART XIV — ESCALATION VALIDATION
+
+## 34. IMPACT VALIDATION MATRIX
+
+Do not assume escalation from the primitive.
+
+| Potential consequence | Required evidence |
+|---|---|
+| Header manipulation | Independent field creation |
+| Cookie manipulation | Cookie parsed and accepted |
+| Session fixation | Session behavior demonstrated |
+| Open redirect | Redirect destination controlled |
+| Security-policy modification | Policy actually interpreted differently |
+| Content-type manipulation | Downstream content interpretation changes |
+| XSS | Script execution demonstrated in a controlled context |
+| Response splitting | Multiple messages interpreted from one response |
+| Cache poisoning | Shared-cache behavior safely established in isolation |
+| Request smuggling | Parser disagreement and request-boundary impact demonstrated |
+| SMTP injection | Serialized email structure changed |
+| SSE event forgery | Separate event parsed by controlled client |
+| Log forging | Log consumer interprets attacker data as another record |
+| Outbound request manipulation | Controlled receiving endpoint observes changed request |
+
+### 34.1 Response splitting
+
+Distinguish:
+
+- Additional response header
+- Premature header termination
+- Apparent second response
+- Actual multiple-message interpretation
+
+These are different evidence levels.
+
+### 34.2 HTTP request smuggling
+
+Do not classify a CRLF issue as request smuggling without demonstrating request-boundary disagreement between relevant components.
+
+### 34.3 Cache poisoning
+
+Use an isolated cache or a dedicated test object.
+
+Do not poison shared production content or expose other users to manipulated responses.
+
+### 34.4 XSS
+
+Use a controlled environment and harmless proof of execution.
+
+A Content-Type change alone does not establish XSS.
+
+---
+
+# PART XV — ADVANCED TESTING TOOLKIT
+
+## 35. BURP SUITE
+
+Use:
+
+- Proxy history
+- Repeater
+- Comparer
+- Logger
+- HTTP history
+- Collaborator
+- Extensions for controlled discovery
+
+Recommended workflow:
+
+1. Capture a baseline.
+2. Identify one candidate input.
+3. Duplicate the request.
+4. Change one input.
+5. Compare raw responses.
+6. Record protocol details.
+7. Preserve the test evidence.
+8. Reproduce manually.
+
+Do not rely on extension-generated severity alone.
+
+## 36. CURL
+
+Useful capabilities:
+
+- HTTP/1.1 comparison
+- HTTP/2 comparison
+- Header-only output capture
+- Body separation
+- Raw path preservation
+- Verbose protocol diagnostics
+
+Example baseline:
+
+    curl --http1.1 -i 'https://authorized.example/path'
+
+Example harmless marker test:
+
+    curl --http1.1 -i \
+      'https://authorized.example/path?value=%0D%0AX-CRLF-Probe%3A%20CRLF-2026-7F31'
+
+Capture headers separately:
+
+    curl --http1.1 \
+      -D response-headers.txt \
+      -o response-body.txt \
+      'https://authorized.example/path'
+
+Compare HTTP versions where supported:
+
+    curl --http1.1 -i 'https://authorized.example/path'
+
+    curl --http2 -i 'https://authorized.example/path'
+
+Note: The second command requires a curl build with HTTP/2 support. Client normalization and intermediary behavior must still be considered.
+
+## 37. WIRESHARK AND TCPDUMP
+
+Use when raw transport evidence is necessary.
+
+Investigate:
+
+- Actual HTTP/1.1 bytes
+- TCP segmentation
+- Connection reuse
+- Response boundaries
+- Proxy-to-origin behavior in controlled environments
+
+TLS traffic requires appropriate authorized decryption or endpoint instrumentation.
+
+## 38. MITMPROXY
+
+Useful for:
+
+- Intermediary behavior
+- Protocol translation observation
+- Request and response comparison
+- Controlled test environments
+- Transformation instrumentation
+
+## 39. AUTOMATED TOOLS
+
+Potential tools:
+
+- crlfuzz
+- nuclei
+- OWASP ZAP
+- Burp Suite
+- ffuf
+- interactsh
+- Custom source-to-sink analyzers
+
+Use scanners for candidate discovery.
+
+Manually verify every important finding.
+
+Do not run aggressive fuzzing across production applications or state-changing workflows.
+
+---
+
+# PART XVI — ADVANCED RESEARCH STRATEGIES
+
+## 40. DIFFERENTIAL FUZZING
+
+Build a controlled differential testing system.
+
+Compare the same logical input across:
+
+- HTTP/1.1
+- HTTP/2
+- HTTP/3
+- Different application instances
+- Different proxy paths
+- Different framework versions
+- Different serializer implementations
+
+The goal is to identify inconsistent handling.
+
+Record every difference rather than treating every difference as exploitable.
+
+## 41. PROPERTY-BASED TESTING
+
+Define security properties that must always hold.
+
+PROPERTY 1:
+
+No CR or LF originating from untrusted input may become an unintended HTTP field delimiter.
+
+PROPERTY 2:
+
+No HTTP field serializer may emit invalid field values.
+
+PROPERTY 3:
+
+No protocol downgrade may introduce prohibited control characters.
+
+PROPERTY 4:
+
+All application paths must apply consistent validation.
+
+PROPERTY 5:
+
+A value accepted by an upstream component must not become structurally dangerous after downstream transformation.
+
+PROPERTY 6:
+
+Header APIs must preserve the intended distinction between field names and field values.
+
+PROPERTY 7:
+
+Log records must not be forgeable through untrusted line terminators.
+
+PROPERTY 8:
+
+SSE encoders must prevent attacker-controlled values from introducing unintended fields or events.
+
+Test these properties across all supported application versions.
+
+## 42. METAMORPHIC TESTING
+
+A useful advanced technique is checking whether logically equivalent representations produce unexpectedly different security outcomes.
+
+Compare:
+
+- Uppercase and lowercase percent-encoding
+- Encoded versus decoded input
+- Single versus repeated decoding
+- Different parameter locations
+- Equivalent Unicode representations
+- Different content types
+- Different proxy routes
+- Different HTTP protocol versions
+
+The goal is not to assume a bypass.
+
+The goal is to discover a transformation inconsistency that can then be explained and reproduced.
+
+## 43. STATEFUL CROSS-REQUEST TESTING
+
+Test data that moves between requests.
+
+Example:
+
+Request 1:
+Submit a harmless marker into an authorized profile field.
+
+Request 2:
+Retrieve the profile.
+
+Request 3:
+Trigger an authorized notification.
+
+Request 4:
+Inspect the generated protocol message.
+
+This can identify vulnerabilities that ordinary one-request fuzzing misses.
+
+Use dedicated test accounts and controlled destinations.
+
+## 44. MULTI-COMPONENT TRUST-BOUNDARY TESTING
+
+Create a component map:
+
+CLIENT
+  -> CDN
+  -> WAF
+  -> LOAD BALANCER
+  -> REVERSE PROXY
+  -> APPLICATION
+  -> INTERNAL SERVICE
+  -> EXTERNAL LIBRARY
+
+For each transition, ask:
+
+1. Is the data decoded?
+2. Is it normalized?
+3. Is it validated?
+4. Is it re-encoded?
+5. Is it serialized?
+6. Is it parsed again?
+7. Is the protocol changed?
+
+A single request can pass through multiple parsers and serializers.
+
+The objective is to identify the exact boundary where safe data becomes unsafe protocol structure.
+
+## 45. UNKNOWN-SINK DISCOVERY
+
+When source code is available, go beyond known header functions.
+
+Search for:
+
+- String concatenation
+- String formatting
+- Raw byte-buffer writes
+- Template rendering
+- Protocol encoder calls
+- Custom middleware
+- Serialization adapters
+- Logging formatters
+- Message queue consumers
+- Background worker output
+
+Then trace whether attacker-controlled data can reach these operations.
+
+This is one of the most valuable approaches for discovering previously unreported issues.
+
+---
+
+# PART XVII — MACHINE-READABLE EVIDENCE
+
+## 46. EVIDENCE RECORD TEMPLATE
+
+    {
+      "test_id": "CRLF-2026-7F31",
+      "target": "https://authorized.example/",
+      "endpoint": "/redirect",
+      "parameter": "return",
+      "source_type": "query_parameter",
+      "input_representation": "percent_encoded",
+      "protocol": "HTTP/1.1",
+      "candidate_sink": "Location",
+      "transformation_chain": [
+        "request_parsing",
+        "url_decoding",
+        "application_processing"
+      ],
+      "baseline_status": 302,
+      "test_status": 302,
+      "marker_reflected": true,
+      "sink_reached": true,
+      "independent_header_observed": false,
+      "boundary_change_observed": false,
+      "downstream_interpretation": "unknown",
+      "reproducibility": "not_confirmed",
+      "security_impact": "not_demonstrated",
+      "confidence": "candidate",
+      "notes": "Requires further verification"
+    }
+
+## 47. RESEARCH RESULT CATEGORIES
+
+Use consistent result labels:
+
+- NOT_TESTED
+- REJECTED
+- NORMALIZED
+- ENCODED
+- REFLECTED
+- SINK_CANDIDATE
+- SINK_CONFIRMED
+- STRUCTURAL_INJECTION
+- DOWNSTREAM_INTERPRETATION
+- IMPACT_CONFIRMED
+- INCONCLUSIVE
+
+Avoid using a single Boolean vulnerable/not-vulnerable result for every test.
+
+---
+
+# PART XVIII — REPORTING
+
+## 48. ADVANCED BUG BOUNTY REPORT TEMPLATE
+
+TITLE:
+
+CRLF Injection in [Endpoint] Allows [Demonstrated Structural Effect]
+
+SUMMARY:
+
+An attacker-controlled value in [parameter] reaches [specific protocol sink] through [identified transformation path].
+
+Testing demonstrated [exact structural change].
+
+The issue affects [specific component or workflow].
+
+A separate downstream security consequence was [demonstrated/not demonstrated].
+
+AFFECTED ASSET:
+
+[Authorized target]
+
+AFFECTED ENDPOINT:
+
+[Endpoint]
+
+SOURCE:
+
+[Parameter, header, filename, stored value or external input]
+
+SINK:
+
+[Specific response header, outbound request header, MIME field, SSE field or log record]
+
+PROTOCOL:
+
+[HTTP/1.1, HTTP/2, HTTP/3, SMTP, MIME, SSE or other]
+
+PRECONDITIONS:
+
+[Authentication, privileges, user interaction and other requirements]
+
+TEST ENVIRONMENT:
+
+[Browser, proxy, framework, application version, protocol]
+
+STEPS TO REPRODUCE:
+
+1. Capture a baseline request and response.
+2. Identify the affected input.
+3. Submit a harmless unique marker.
+4. Inspect the raw response or serialized message.
+5. Compare the result against the baseline.
+6. Confirm the independently interpreted structure.
+7. Repeat the test.
+
+BASELINE:
+
+[Raw baseline evidence]
+
+TEST REQUEST:
+
+[Exact request with harmless marker]
+
+TEST RESPONSE:
+
+[Raw response evidence]
+
+STRUCTURAL DIFFERENCE:
+
+[Explain exactly what changed]
+
+DOWNSTREAM VERIFICATION:
+
+[Explain how the receiving parser interpreted the result]
+
+SECURITY IMPACT:
+
+[Only demonstrated impact]
+
+REPRODUCIBILITY:
+
+[Number of successful attempts]
+
+RECOMMENDATION:
+
+- Reject CR, LF and NUL in HTTP field values.
+- Use framework-provided header APIs.
+- Avoid raw protocol-string construction.
+- Validate after decoding and before serialization.
+- Apply consistent validation across intermediaries.
+- Add regression tests for the affected workflow.
+
+ATTACHMENTS:
+
+- baseline-request.txt
+- baseline-response.txt
+- test-request.txt
+- test-response.txt
+- raw-diff.txt
+- evidence.json
+
+---
+
+# PART XIX — REMEDIATION AND REGRESSION TESTING
+
+## 49. DEFENSIVE VALIDATION
+
+For HTTP field values:
+
+- Reject CR.
+- Reject LF.
+- Reject NUL.
+- Apply validation after relevant transformations.
+- Use framework header APIs.
+- Never construct raw header lines from untrusted input.
+- Never allow user-controlled field names.
+- Validate redirect destinations separately.
+- Validate multipart filenames separately.
+- Use proper encoding for international filenames.
+- Validate outbound request metadata.
+- Sanitize SSE fields according to their field-specific rules.
+- Use structured logging.
+
+For every application field, validation should reflect its destination context.
+
+A value safe for HTML is not necessarily safe for an HTTP header.
+
+A value safe for a database is not necessarily safe for a MIME header.
+
+## 50. REGRESSION TEST SUITE
+
+Build automated tests covering:
+
+- Literal CR
+- Literal LF
+- CRLF
+- NUL
+- Percent-encoded CR
+- Percent-encoded LF
+- Repeated encoding
+- Unicode conversion
+- Validation-order behavior
+- Header API behavior
+- Redirect generation
+- Cookie generation
+- Multipart serialization
+- SSE serialization
+- Outbound HTTP requests
+- Log formatting
+
+Verify both:
+
+1. The application rejects or safely handles invalid input.
+2. The final serialized output contains no unintended protocol delimiters.
+
+Run the suite whenever:
+
+- Framework versions change.
+- HTTP libraries change.
+- Reverse proxies change.
+- CDN configuration changes.
+- Middleware changes.
+- Application serialization code changes.
+
+---
+
+# PART XX — FINAL ADVANCED DETECTION CHECKLIST
+
+## 51. PRE-TEST
+
+[ ] Target authorization confirmed.
+
+[ ] Application scope confirmed.
+
+[ ] Relevant workflows identified.
+
+[ ] Authentication requirements established.
+
+[ ] HTTP protocols identified.
+
+[ ] CDN and proxy paths identified where observable.
+
+[ ] Baseline request and response captured.
+
+[ ] Unique harmless marker generated.
+
+## 52. SOURCE DISCOVERY
+
+[ ] Query parameters inspected.
+
+[ ] Path parameters inspected.
+
+[ ] Request headers inspected.
+
+[ ] Cookies inspected.
+
+[ ] JSON and XML fields inspected.
+
+[ ] Multipart filenames inspected.
+
+[ ] Stored values inspected.
+
+[ ] External API inputs inspected.
+
+[ ] Background workflows considered.
+
+## 53. TRANSFORMATION DISCOVERY
+
+[ ] URL decoding investigated.
+
+[ ] Repeated decoding investigated where justified.
+
+[ ] Unicode conversion investigated where relevant.
+
+[ ] Validation order examined.
+
+[ ] Normalization behavior examined.
+
+[ ] Character-set conversion examined.
+
+[ ] Serializer input identified where possible.
+
+[ ] Unknown stages marked as unknown.
+
+## 54. SINK DISCOVERY
+
+[ ] Response-header sinks investigated.
+
+[ ] Outbound request sinks investigated.
+
+[ ] Redirect and cookie workflows investigated.
+
+[ ] MIME sinks investigated.
+
+[ ] SSE sinks investigated.
+
+[ ] Logging sinks investigated.
+
+[ ] Raw serialization paths investigated.
+
+[ ] Third-party library involvement investigated.
+
+## 55. PROTOCOL DIFFERENTIALS
+
+[ ] HTTP/1.1 tested.
+
+[ ] HTTP/2 tested where supported.
+
+[ ] HTTP/3 tested where supported.
+
+[ ] Downgrade paths investigated.
+
+[ ] Proxy normalization investigated.
+
+[ ] Downstream parsing investigated.
+
+[ ] Version-specific behavior documented.
+
+## 56. EVIDENCE
+
+[ ] Baseline preserved.
+
+[ ] Unique marker observed.
+
+[ ] Actual sink identified.
+
+[ ] Independent field verified.
+
+[ ] Raw response inspected.
+
+[ ] Downstream interpretation verified where possible.
+
+[ ] Reproduction completed.
+
+[ ] False positives eliminated.
+
+[ ] Impact demonstrated or explicitly marked unproven.
+
+## 57. REPORTING
+
+[ ] Exact affected endpoint documented.
+
+[ ] Input location documented.
+
+[ ] Transformation chain documented.
+
+[ ] Sink documented.
+
+[ ] Protocol documented.
+
+[ ] Raw evidence attached.
+
+[ ] Baseline comparison attached.
+
+[ ] Reproduction steps included.
+
+[ ] Severity reflects demonstrated impact.
+
+[ ] No speculative escalation claims.
+
+---
+
+# PART XXI — ULTIMATE RESEARCH PRINCIPLES
+
+## 58. THE 15 RULES OF ADVANCED CRLF DISCOVERY
+
+1. Never confuse input acceptance with vulnerability confirmation.
+
+2. Never assume percent encoding is decoded exactly once.
+
+3. Never assume a framework's behavior represents every component in the request chain.
+
+4. Never assume an HTTP/2 edge and HTTP/1.1 origin have equivalent validation.
+
+5. Never assume a header reflected in a response was independently injected.
+
+6. Never overlook stored values and asynchronous workflows.
+
+7. Never limit discovery to query parameters.
+
+8. Never assume that a WAF rejection proves origin security.
+
+9. Never assume that an additional header automatically establishes response splitting.
+
+10. Never infer XSS, ATO, SSRF or cache poisoning without proving the required chain.
+
+11. Always distinguish character representations from actual serialized bytes.
+
+12. Always compare against a baseline.
+
+13. Always identify the serialization sink.
+
+14. Always investigate downstream parser interpretation.
+
+15. Always report the strongest consequence actually demonstrated, not the most severe theoretical possibility.
+
+---
+
+# 59. THE FINAL DETECTION FORMULA
+
+The ultimate CRLF detection methodology is:
+
+SOURCE DISCOVERY
+    +
+TRANSFORMATION RECONSTRUCTION
+    +
+DATA-FLOW ANALYSIS
+    +
+SINK IDENTIFICATION
+    +
+SERIALIZER VERIFICATION
+    +
+PROTOCOL DIFFERENTIAL TESTING
+    +
+DOWNSTREAM PARSER ANALYSIS
+    +
+REPRODUCIBLE STRUCTURAL EVIDENCE
+    +
+SECURITY IMPACT VALIDATION
+
+A strong CRLF finding establishes:
+
+"An attacker-controlled value reaches a specific protocol serialization sink, passes through an identifiable transformation chain, introduces an unintended structural delimiter, and causes a downstream component to interpret the resulting message differently."
+
+A high-impact finding additionally establishes the resulting security consequence.
+
+The ultimate goal is not to find the largest number of accepted payloads.
+
+It is to discover the largest number of genuinely vulnerable source-to-sink paths while minimizing false positives and producing independently reproducible evidence.
+
+================================================================================
+END OF ADVANCED CRLF INJECTION DETECTION MASTER REFERENCE
+================================================================================
