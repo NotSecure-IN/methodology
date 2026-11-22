@@ -1,0 +1,518 @@
+================================================================================
+ULTIMATE ORIGIN IP DISCOVERY — CONSOLIDATED 2026 RUNBOOK
+================================================================================
+SCOPE: Authorized only. Passive-first. Active validation gated by explicit approval.
+GOAL:  Prove current origin ownership with independent, non-derivative evidence.
+================================================================================
+
+
+[ PHASE 0 — PRE-FLIGHT: EVIDENCE MODEL + AUTHORIZATION GATE ]
+================================================================================
+
+Define before any collection:
+
+  TARGET_DOMAIN
+  AUTHORIZED_COMPONENTS (frontend / API / auth / static / mobile / regional)
+  APPROVED_PASSIVE_SOURCES
+  APPROVED_ACTIVE_VALIDATION_METHODS
+  RATE_LIMITS / STOP CONDITIONS
+  LEGAL_CONTACT / ESCALATION PATH
+
+Evidence record schema:
+
+  EVIDENCE_ID | SOURCE | SOURCE_TYPE | COLLECTED_AT | OBSERVED_AT |
+  HOSTNAME | IP | RELATION | DNS_STATE_AT_COLLECTION |
+  ASN_AT_COLLECTION | PROVIDER_AT_COLLECTION | CERT_VALIDITY |
+  HTTP_TLS_FINGERPRINT | HISTORICAL_OR_CURRENT | CONTRADICTION | CONFIDENCE
+
+Core principle:
+  No candidate IP is an origin without independently corroborated ownership evidence.
+
+
+[ PHASE 1 — PASSIVE DOMAIN + CERTIFICATE + HISTORICAL DNS ]
+================================================================================
+
+1A. DOMAIN INVENTORY
+
+  dig +short A example.com
+  dig +short AAAA example.com
+  dig +short CNAME example.com
+  dig +short NS example.com
+  dig +short MX example.com
+  dig +short TXT example.com
+  dig +short SOA example.com
+  dig +short CAA example.com
+
+1B. SUBDOMAIN ENUMERATION
+
+  subfinder -d example.com -all -silent > subs_raw.txt
+  amass enum -passive -d example.com >> subs_raw.txt
+  sort -u subs_raw.txt > subs_unique.txt
+  dnsx -l subs_unique.txt -a -aaaa -cname -resp -silent > subs_resolved.txt
+
+  Categorize: production / staging / dev / legacy / API / auth / static /
+  upload / download / regional / admin / infrastructure.
+
+1C. CERTIFICATE TRANSPARENCY
+
+  https://crt.sh/?q=%25.example.com&output=json
+
+  Extract: Subject CN, SAN entries, Issuer, SHA-256, Not-Before/Not-After,
+  first observed. Build certificate-to-hostname graph.
+
+1D. HISTORICAL DNS RECONSTRUCTION
+
+  Sources: SecurityTrails, DNSDB, ViewDNS, DomainTools, VirusTotal, Censys.
+
+  Timeline:
+    DATE | HOSTNAME | RECORD_TYPE | VALUE | SOURCE | CONFIDENCE
+
+  Questions:
+    - What IPs served the hostname before CDN adoption?
+    - Did CNAME chains change during migration?
+    - Do historical A records point to a different provider?
+
+  Do not assume old IPs remain origins. Reassignment is the norm.
+
+
+[ PHASE 2 — DNS EDGE-CASE ANALYSIS (NEW — MODULE 10) ]
+================================================================================
+
+2A. CNAME CHAINS, LOOPS, FLATTENING
+
+  dig +trace example.com
+  dig CNAME www.example.com
+  dig CNAME api.example.com
+
+  Look for:
+    - Flattened CNAMEs (A records at apex where a CNAME would normally appear)
+    - Chain termination at a CDN vs. a hosting provider
+    - Loops indicating misconfiguration
+
+2B. ALIAS / ANAME RECORDS
+
+  Where the DNS provider supports them, ALIAS/ANAME may hide the true backend.
+  Query with provider-specific tools or authoritative nameserver directly.
+
+2C. HTTPS AND SVCB RECORDS
+
+  dig HTTPS example.com
+  dig SVCB example.com
+
+  These can expose:
+    - Alternate endpoints
+    - ALPN hints
+    - ipv4hint / ipv6hint parameters that may reveal origin hints
+    - echconfig that masks SNI
+
+2D. NS DELEGATION, GLUE, AND NAMESERVER HISTORY
+
+  dig NS example.com
+  dig +trace example.com
+
+  Historical NS changes can reveal hosting migrations. Check:
+    - SecurityTrails NS history
+    - Passive DNS for delegation changes
+
+2E. WILDCARD DNS BEHAVIOR
+
+  dig random-string.example.com
+  dig random-string.example.com @8.8.8.8
+  dig random-string.example.com @1.1.1.1
+
+  Wildcards can mask real subdomains. Test with random labels.
+
+2F. SPLIT-HORIZON / RESOLVER-DEPENDENT RESPONSES
+
+  Query multiple resolvers:
+    dig example.com @8.8.8.8
+    dig example.com @1.1.1.1
+    dig example.com @9.9.9.9
+    dig example.com @<authoritative-NS>
+
+  Different answers may indicate:
+    - Split-horizon DNS
+    - GeoDNS
+    - Resolver-based filtering
+
+2G. A/AAAA/CNAME INCONSISTENCIES
+
+  Compare responses across record types and resolvers.
+  Inconsistencies are correlation clues, not proof.
+
+
+[ PHASE 3 — APPLICATION-LAYER INFRASTRUCTURE CORRELATION (NEW — MODULE 11) ]
+================================================================================
+
+Collect from authorized, publicly observable responses:
+
+  - Alt-Svc advertisements (HTTP/3, alternate ports, alternate hosts)
+  - HTTP/2 and HTTP/3 behavior (SETTINGS frames, server push, priority)
+  - Redirect chains (Location headers, intermediate hosts)
+  - Canonical host behavior (rel=canonical, canonical Link headers)
+  - Absolute asset and API URLs in HTML/JS/CSS
+  - WebSocket and gRPC hostnames
+  - Cookie domain attributes (Domain=, Path=, SameSite=)
+  - CORS configuration (Access-Control-Allow-Origin)
+  - Host-dependent response differences (vary by Host header)
+  - CDN-added vs. application-generated headers (Server, Via, X-Cache, CF-Ray, etc.)
+
+  Treat every observation as a correlation clue, not proof of ownership.
+
+
+[ PHASE 4 — PASSIVE INTERNET EXPOSURE + FINGERPRINT INTELLIGENCE ]
+================================================================================
+
+4A. SHODAN / CENSYS / NETLAS / FOFA / ZOOMEYE
+
+  Query patterns:
+    ssl:"example.com"
+    ssl.cert.subject.CN:"example.com"
+    http.title:"Example App"
+    http.favicon.hash:<hash>
+
+  Collect: IP, ASN, reverse DNS, TLS cert, HTTP headers, banner,
+  first/last seen, historical observations.
+
+4B. FAVICON HASH CORRELATION
+
+  Compute favicon hash from the fronted site. Search Shodan for the same hash.
+  Non-CDN IPs serving the same favicon are CANDIDATES, not confirmed origins.
+
+4C. JARM + TLS FINGERPRINTING
+
+  JARM clusters TLS server stacks. A CDN terminates TLS at the edge, so JARM on the
+  fronted domain reveals the CDN, not the origin. Use JARM only on candidate IPs to
+  cluster them by TLS configuration. Not an ownership proof.
+
+4D. HTTP/2 + JA3/JA4 SUPPLEMENTARY FINGERPRINTS
+
+  JA3/JA4 describe the client side. Akamai HTTP/2 fingerprint (SETTINGS + priority +
+  pseudo-header order) can reveal a shared reverse-proxy or load-balancer stack.
+  Use as CLUSTERING SIGNALS only.
+
+
+[ PHASE 5 — ASN, BGP, AND CLOUD ATTRIBUTION ]
+================================================================================
+
+5A. ASN + NETWORK ATTRIBUTION
+
+  whois <IP>
+  dig -x <IP>
+  https://rdap.org/ip/<IP>
+
+  Record: ASN, org, prefix, country, hosting category.
+  Classify: CDN edge / cloud / dedicated / shared / enterprise / ISP / load balancer.
+
+5B. BGP ROUTE HISTORY
+
+  https://stat.ripe.net/data/routing-history/data.json?resource=<PREFIX>
+
+  Look for:
+    - Origin ASN changes on the candidate prefix
+    - Prefix announcements around the target's migration window
+    - Anycast vs. unicast origin
+
+  Temporal correlation is a STRONG signal — still not ownership proof.
+
+5C. CLOUD PROVIDER DETECTION + RANGE EXCLUSION
+
+  AWS:    https://ip-ranges.amazonaws.com/ip-ranges.json
+  GCP:    https://www.gstatic.com/ipranges/cloud.json
+  Azure:  Service Tags / published ranges
+  Cloudflare: https://www.cloudflare.com/ips-v4 / ips-v6
+
+  Exclude known CDN/cloud edge ranges before ranking.
+  For cloud candidates, determine SERVICE (EC2 vs ELB vs CloudFront vs S3)
+  using provider-specific DNS patterns and headers.
+
+  Metadata endpoints (169.254.169.254, metadata.google.internal) are BLOCKED
+  externally. Do NOT attempt to access them.
+
+
+[ PHASE 6 — APPLICATION COMPONENT DECOMPOSITION ]
+================================================================================
+
+Decompose into independent infrastructure groups:
+
+  1. Main frontend
+  2. Authentication
+  3. REST API
+  4. GraphQL
+  5. WebSocket gateway
+  6. Mobile API
+  7. Static asset host
+  8. Image/upload processing
+  9. Download service
+  10. Regional applications
+  11. Administrative/legacy applications
+
+  For each: enumerate hostnames, certificates, CDN/WAF, and candidate sets
+  independently. Frontend and API origins may live in different providers.
+
+
+[ PHASE 7 — ADVANCED LEAKAGE CHANNELS (PUBLIC ONLY, AUTHORIZED SCOPE) ]
+================================================================================
+
+7A. JAVASCRIPT SOURCE MAP ANALYSIS
+
+  curl -s https://example.com/static/js/app.js | tail -c 200
+
+  If sourceMappingURL is present, fetch the .map and inspect for:
+    - Internal hostnames
+    - Private IPs
+    - API base URLs pointing to non-CDN infrastructure
+    - Deployment metadata
+
+7B. MOBILE APPLICATION BUNDLE ANALYSIS (AUTHORIZED)
+
+  strings app.apk | grep -Ei 'https?://|api\.|origin|backend'
+
+  Look for hardcoded API endpoints, non-CDN hostnames, internal IP ranges.
+  Treat every discovered endpoint as an UNVERIFIED LEAD.
+
+7C. PUBLIC ERROR / METADATA DISCLOSURE
+
+  Review only publicly accessible resources within scope:
+    - Error pages leaking internal hostnames
+    - Misconfigured redirects to internal infrastructure
+    - Public deployment manifests
+    - CORS headers revealing allowed origins
+
+  Do NOT exploit SSRF, access private metadata endpoints, or retrieve credentials.
+
+
+[ PHASE 8 — INFRASTRUCTURE ROLE CLASSIFICATION (NEW — MODULE 12) ]
+================================================================================
+
+Classify each candidate as exactly one role:
+
+  - Direct application origin
+  - Load balancer
+  - Reverse proxy
+  - Kubernetes ingress or gateway
+  - Shared hosting endpoint
+  - CDN upstream or parent proxy
+  - Regional application endpoint
+  - Static-content endpoint
+  - Object-storage endpoint
+  - Unknown infrastructure role
+
+Do not label an IP as the origin until its architectural role is adequately
+supported by evidence. A load balancer is not an application server.
+
+
+[ PHASE 9 — TEMPORAL EVIDENCE + EVIDENCE INDEPENDENCE (MODULES 13–14) ]
+================================================================================
+
+9A. TEMPORAL EVIDENCE MANAGEMENT
+
+  For every observation preserve:
+    - Collection timestamp
+    - Source and source type
+    - DNS state at collection time
+    - IP-to-ASN relationship
+    - Hosting-provider attribution
+    - Certificate validity period
+    - Relevant HTTP/TLS fingerprints
+    - Historical vs. current status
+
+  Account for IP reassignment, migration, and evidence expiration.
+
+9B. EVIDENCE INDEPENDENCE AND CONTRADICTION ANALYSIS
+
+  For each candidate:
+    - Identify the original source of each observation
+    - Detect duplicated or derivative intelligence
+    - Separate independent evidence from repeated copies
+    - Record contradictory observations
+    - Evaluate source reliability and freshness
+    - Recalculate confidence when evidence changes
+
+  Do NOT increase confidence merely because multiple services reproduce the
+  same underlying observation. Ten copies of one Shodan scan is one observation.
+
+
+[ PHASE 10 — SHARED INFRASTRUCTURE AND MULTI-TENANCY (MODULE 15) ]
+================================================================================
+
+Determine whether the candidate belongs to:
+
+  - Shared cloud infrastructure
+  - Shared reverse-proxy infrastructure
+  - Multi-tenant hosting
+  - Shared load-balancing services
+  - CDN or edge networks
+
+A matching certificate, favicon, HTTP response, or TLS fingerprint alone does
+not establish application ownership on shared infrastructure.
+
+
+[ PHASE 11 — DEDICATED IPv6 INVESTIGATION (MODULE 16) ]
+================================================================================
+
+Evaluate separately from IPv4:
+
+  - Historical AAAA records
+  - IPv6-specific service exposure
+  - IPv4/IPv6 response differences
+  - IPv6 certificate observations
+  - IPv6 ASN and hosting attribution
+  - Whether IPv6 and IPv4 serve the same application
+
+Do not assume IPv4 and IPv6 infrastructure have identical security configurations.
+
+
+[ PHASE 12 — CANDIDATE RANKING + FALSE-POSITIVE ELIMINATION ]
+================================================================================
+
+Candidate fields:
+
+  CANDIDATE_ID | IP | FAMILY | HOSTNAME | ROLE | RELATION | ASN | PROVIDER |
+  TLS_EVIDENCE | HTTP_EVIDENCE | DNS_SOURCE | CT_SOURCE | EXPOSURE_SOURCE |
+  FIRST_SEEN | LAST_SEEN | CONTRADICTION | CONFIDENCE | STATUS
+
+Confidence:
+
+  WEAK:     same ASN, same cloud, similar server header, similar favicon.
+  MODERATE: historical DNS association, shared cert observation, multiple hostname
+            relationships, matching application metadata.
+  STRONG:   multiple INDEPENDENT passive sources agree, consistent historical
+            timeline, current hostname relationship, application identity correlation.
+  CONFIRMED: owner-provided asset inventory, provider configuration, owner confirmation.
+
+Eliminate or quarantine:
+
+  [ ] CDN edge IPs
+  [ ] Shared hosting with no unique application evidence
+  [ ] Reassigned historical IPs (BGP history + Shodan last-seen)
+  [ ] Mail-only infrastructure
+  [ ] DNS provider anycast addresses
+  [ ] Third-party SaaS endpoints
+  [ ] Unrelated certificate matches
+  [ ] Stale DNS records
+  [ ] Reverse proxy mistaken for application server
+  [ ] Load balancer mistaken for individual origin
+
+Document the rejection reason for every eliminated candidate.
+
+
+[ PHASE 13 — AUTHORIZED ACTIVE VALIDATION (ONLY IF EXPLICITLY PERMITTED) ]
+================================================================================
+
+13A. CONFIRM-BY-HOST-HEADER
+
+  curl -k -s --resolve example.com:443:<CANDIDATE_IP> https://example.com/ \
+    -o /dev/null -w "%{http_code} %{size_download}\n"
+
+  Compare: status, size, first-1KB body hash, TLS certificate presented.
+
+13B. CERTIFICATE-ON-IP CHECK
+
+  openssl s_client -connect <CANDIDATE_IP>:443 -servername example.com </dev/null 2>/dev/null |
+    openssl x509 -noout -subject -issuer -fingerprint -sha256
+
+13C. DIFFERENTIAL RESPONSE ANALYSIS
+
+  Compare fronted vs. direct-origin:
+    FRONTED_HASH vs. CANDIDATE_HASH
+    FRONTED_HEADERS vs. CANDIDATE_HEADERS
+    FRONTED_COOKIES vs. CANDIDATE_COOKIES
+
+  Differences may reveal origin-level debug headers, missing WAF headers,
+  different server versions, or alternate auth behavior.
+
+13D. RECORD EVERYTHING
+
+  timestamp, source IP, target IP, Host header, TLS cert fingerprint,
+  response status, size, hash, contradictions.
+
+  A successful direct connection is NOT evidence of a WAF bypass.
+  A confirmed origin IP alone is NOT a vulnerability.
+
+
+[ PHASE 14 — FINAL EVIDENCE AND IMPACT GATES (MODULE 17) ]
+================================================================================
+
+Maintain SEPARATE conclusions for:
+
+  GATE 1: Candidate IP identified.
+  GATE 2: Application association supported.
+  GATE 3: Current infrastructure role supported.
+  GATE 4: Direct accessibility demonstrated.
+  GATE 5: Security impact demonstrated.
+
+Do not collapse Gate 1 into Gate 5. An IP address discovery alone is not
+proof of a vulnerability.
+
+Final classification:
+
+  CLASS 1 — CDN EDGE
+  CLASS 2 — UNKNOWN INFRASTRUCTURE
+  CLASS 3 — HISTORICAL ORIGIN CANDIDATE
+  CLASS 4 — CURRENT ORIGIN CANDIDATE
+  CLASS 5 — CORROBORATED ORIGIN
+  CLASS 6 — OWNER-VERIFIED ORIGIN
+  CLASS 7 — OWNER-VERIFIED ORIGIN WITH PUBLIC EXPOSURE
+  CLASS 8 — OWNER-VERIFIED ORIGIN WITH DEMONSTRATED SECURITY WEAKNESS
+
+
+[ PHASE 15 — REPORTING ]
+================================================================================
+
+TARGET:
+COMPONENT:
+CANDIDATE IP:
+ADDRESS FAMILY:
+PROVIDER:
+ROLE:
+ORIGIN STATUS:
+EVIDENCE SOURCES (independent):
+OBSERVATION TIMELINE:
+APPLICATION CORRELATION:
+DIRECT ACCESS VALIDATION:
+INTENDED SECURITY CONTROL:
+ACTUAL BEHAVIOR:
+DEMONSTRATED IMPACT:
+FALSE-POSITIVE REVIEW:
+REMEDIATION:
+
+Remediation:
+  [ ] Restrict origin ingress to trusted edge networks only
+  [ ] Enforce CDN-to-origin authentication (mTLS / secret header / authenticated origin pulls)
+  [ ] Review alternate hostnames for the same origin
+  [ ] Apply identical policy to IPv4 and IPv6
+  [ ] Protect secondary/failover origins
+  [ ] Retire legacy infrastructure still reachable directly
+  [ ] Monitor for unexpected direct-origin requests
+
+
+[ TOOL STACK (2026) ]
+================================================================================
+
+Passive DNS:        SecurityTrails, DNSDB, ViewDNS, DomainTools
+Certificates:       crt.sh, Censys, OpenSSL
+Exposure:           Shodan, Censys, Netlas, FOFA, ZoomEye
+Subdomains:         subfinder, amass, dnsx
+DNS edge cases:     dig (+trace, HTTPS/SVCB queries), multiple resolvers
+Favicon:            favup
+JARM/TLS:           jarm, JA3/JA4 tools, OpenSSL
+HTTP/2 fingerprint: JA4H, Akamai HTTP/2 fingerprint libraries
+BGP history:        RIPE Stat Routing History
+Cloud ranges:       AWS ip-ranges.json, GCP cloud.json, Azure service tags, Cloudflare IPs
+Correlation:        Python, jq, SQLite, CSV/JSON
+
+
+[ ONE-LINE TRUTH ]
+================================================================================
+
+The most advanced approach is not one tool or one query. It is:
+broad passive collection → DNS and application-layer edge-case analysis →
+evidence independence and contradiction analysis → strict role classification →
+false-positive elimination → owner-verified confirmation.
+NO technique guarantees origin discovery. Private origins and outbound-only
+tunnels may have no publicly discoverable address.
+
+================================================================================
+END — CONSOLIDATED ULTIMATE ORIGIN IP DISCOVERY RUNBOOK 2026
+================================================================================
