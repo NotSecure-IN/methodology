@@ -1,0 +1,2266 @@
+# XML External Entity (XXE) Injection
+## Comprehensive Detection, Testing, Verification, and Reporting Manual
+
+**Level:** Beginner to Advanced  
+**Primary use:** Authorized penetration testing, bug bounty assessments, security audits, and application security research  
+**Testing tools:** Burp Suite Professional, Burp Collaborator, controlled DNS/HTTP callback server, browser, command-line XML utilities  
+**Vulnerability classification:** CWE-611 — Improper Restriction of XML External Entity Reference  
+**Primary objective:** Identify XML-processing components that resolve attacker-controlled external entities, determine the security impact, and produce reproducible evidence without unnecessarily accessing sensitive data or disrupting systems.
+
+---
+
+# PART 1 — UNDERSTANDING XXE
+
+## 1. What Is XML External Entity Injection?
+
+XML External Entity (XXE) injection is a vulnerability that occurs when an application processes attacker-controlled XML using an XML parser that permits unsafe external entity resolution.
+
+XML supports entities, which are references to data declared inside a document or an external resource.
+
+An application may legitimately use XML to process:
+
+- API requests and responses
+- SOAP messages
+- SAML authentication messages
+- XML configuration files
+- SVG images
+- Office documents
+- RSS and Atom feeds
+- Sitemap files
+- XML-based imports and exports
+- Document conversion and preview operations
+- Data synchronization
+- Third-party integrations
+
+The security problem arises when the parser resolves an external entity without an appropriate security restriction.
+
+Depending on the parser, application behavior, operating system, and network environment, XXE can potentially lead to:
+
+1. Local file disclosure.
+2. Server-Side Request Forgery (SSRF).
+3. Access to internal network resources.
+4. Disclosure of internal service responses.
+5. Disclosure of application configuration or environment information.
+6. Authentication or authorization impact through exposed files or services.
+7. Blind out-of-band information disclosure.
+8. Denial of service through unsafe entity expansion.
+9. Exposure of cloud or infrastructure metadata, where accessible.
+10. Information disclosure through parser errors.
+
+**Important:** XXE is not automatically equivalent to remote code execution. RCE requires an additional exploitable condition and should never be assumed from the existence of an XXE vulnerability.
+
+## 2. How XML Entities Work
+
+An XML document can define entities inside a Document Type Definition (DTD).
+
+Example of a normal internal entity:
+
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE note [
+  <!ENTITY company "Example Corporation">
+]>
+<note>
+  <message>Welcome to &company;</message>
+</note>
+```
+
+The parser replaces `&company;` with the value declared in the DTD.
+
+An external entity references a resource:
+
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE note [
+  <!ENTITY external SYSTEM "https://example.com/resource.txt">
+]>
+<note>
+  <message>&external;</message>
+</note>
+```
+
+If the parser permits external entity resolution, it may attempt to retrieve the referenced resource.
+
+The resource could be:
+
+- An HTTP resource.
+- A local file.
+- Another supported URI scheme.
+- An external DTD.
+- A resource accessible through a parser-specific mechanism.
+
+The vulnerability exists when untrusted XML can influence this resolution process and the resulting behavior creates a security impact.
+
+## 3. The XML Processing Chain
+
+Understand the entire processing chain before testing:
+
+```text
+Attacker-controlled input
+        |
+        v
+HTTP request / uploaded file / imported document
+        |
+        v
+Application input handling
+        |
+        v
+XML parser selection
+        |
+        v
+XML document parsing
+        |
+        v
+DTD and entity processing
+        |
+        v
+External resource resolution
+        |
+        +----------------------+
+        |                      |
+        v                      v
+   Local resource         Remote resource
+        |                      |
+        v                      v
+  File/resource read      DNS / HTTP / network
+        |                      |
+        +----------+-----------+
+                   |
+                   v
+          Application behavior
+                   |
+                   v
+      Response / error / OOB event
+```
+
+A successful test depends on several independent conditions:
+
+- The endpoint actually processes XML.
+- The attacker controls or influences the parsed XML.
+- The XML parser supports the relevant feature.
+- The relevant feature is enabled.
+- The parser can access the referenced resource.
+- The application exposes some observable effect.
+
+A failure at any one stage can make a vulnerable-looking payload appear ineffective.
+
+## 4. Important XML Concepts
+
+### 4.1 DOCTYPE
+
+A Document Type Declaration identifies the document type and can contain DTD declarations.
+
+Example:
+
+```xml
+<!DOCTYPE root [
+  <!ENTITY example "test">
+]>
+```
+
+### 4.2 Internal DTD
+
+A DTD declared inside the XML document itself.
+
+```xml
+<!DOCTYPE root [
+  <!ENTITY example "internal value">
+]>
+```
+
+### 4.3 External DTD
+
+A DTD loaded from an external resource.
+
+```xml
+<!DOCTYPE root SYSTEM "https://example.com/example.dtd">
+```
+
+### 4.4 General Entities
+
+General entities are referenced using:
+
+```xml
+&entity;
+```
+
+They can appear in XML document content.
+
+### 4.5 Parameter Entities
+
+Parameter entities are declared and referenced using `%`.
+
+They are primarily used within DTD processing.
+
+Example:
+
+```xml
+<!DOCTYPE root [
+  <!ENTITY % example "test">
+  %example;
+]>
+```
+
+Parameter entities are particularly important when investigating blind XXE and external DTD processing.
+
+### 4.6 External General Entities
+
+These entities refer to external resources and may be substituted into document content.
+
+### 4.7 External Parameter Entities
+
+These entities refer to external resources from within DTD processing.
+
+### 4.8 XInclude
+
+XInclude is an XML mechanism for including external content into an XML document.
+
+It is a separate attack surface from ordinary external entity processing.
+
+### 4.9 Entity Expansion
+
+Entity expansion occurs when the parser replaces entity references with their declared values.
+
+Unsafe expansion can result in resource exhaustion.
+
+### 4.10 XML Namespaces
+
+Namespaces identify XML elements and attributes.
+
+Namespace handling matters when testing XInclude and applications that transform or normalize XML before parsing.
+
+---
+
+# PART 2 — XXE ATTACK CATEGORIES
+
+## 5. In-Band XXE
+
+In-band XXE occurs when the result of entity resolution becomes visible in the application's HTTP response.
+
+Typical behavior:
+
+1. The tester submits XML containing an external entity.
+2. The parser resolves the entity.
+3. The resolved content is inserted into the XML document.
+4. The application returns the processed content.
+5. The tester observes the result.
+
+This is one of the easiest XXE variants to identify.
+
+### Detection indicators
+
+- Unexpected content appears in a response field.
+- A known canary value is returned.
+- A local-resource reference changes the response.
+- The application returns a parser error containing resolved content.
+- XML output contains the substituted entity value.
+
+Do not assume that a changed response proves file disclosure. First establish that the behavior is attributable to entity resolution.
+
+## 6. Blind XXE
+
+Blind XXE occurs when the application processes external entities but does not return their resolved values in the HTTP response.
+
+The vulnerability may still be confirmed through:
+
+- DNS callbacks.
+- HTTP callbacks.
+- Controlled external DTD requests.
+- Parser-generated errors.
+- Timing differences, where independently justified.
+- Other observable side effects.
+
+Blind XXE is especially important in real-world applications because many applications process XML internally and never display the resulting XML.
+
+## 7. Out-of-Band XXE
+
+Out-of-band (OOB) XXE uses a controlled external system to observe activity originating from the target.
+
+The usual testing process is:
+
+1. Generate a unique callback hostname.
+2. Place the hostname in an XML external-resource reference.
+3. Submit the request to the target.
+4. Monitor the controlled callback infrastructure.
+5. Correlate the received event with the test request.
+
+A unique hostname helps distinguish your test from unrelated network traffic.
+
+### Safe OOB canary
+
+Use a domain or callback service that you control.
+
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ENTITY probe SYSTEM "https://UNIQUE-CANARY.YOUR-DOMAIN.example/xxe">
+]>
+<root>&probe;</root>
+```
+
+Replace the example hostname with a unique hostname under your control.
+
+This test is designed to determine whether the parser attempts external resolution. It does not require retrieving sensitive files.
+
+### Interpreting callback results
+
+| Observation | Interpretation |
+|---|---|
+| DNS lookup received | Target-side DNS resolution is likely |
+| HTTP request received | Target-side HTTP retrieval is likely |
+| No callback | Inconclusive; several causes are possible |
+| Multiple callbacks | Parser retries, multiple processing stages, or repeated requests may be occurring |
+| Callback from unexpected infrastructure | Investigate proxying, DNS resolvers, and callback architecture |
+
+A DNS event alone does not prove that HTTP retrieval succeeded or that local file access is possible.
+
+## 8. Error-Based XXE
+
+Error-based XXE involves using parser or application errors to observe information generated during entity processing.
+
+Potential indicators include:
+
+- Invalid external-resource references.
+- Entity declaration errors.
+- DTD parsing failures.
+- URI resolution failures.
+- File access errors.
+- External DTD retrieval errors.
+- Application exceptions containing XML parser details.
+
+### Detection approach
+
+1. Establish normal behavior with valid XML.
+2. Submit a malformed XML document without external entities.
+3. Record the normal parser error.
+4. Submit a controlled external-entity test.
+5. Compare the error messages.
+6. Determine whether the parser attempted external resolution.
+7. Check whether any sensitive data appears unintentionally.
+
+An error that merely mentions `DOCTYPE` or `ENTITY` does not prove exploitable XXE.
+
+## 9. SSRF Through XXE
+
+XXE may cause the server to initiate a request to an external or internal resource.
+
+This can create SSRF behavior.
+
+Potential impact depends on:
+
+- The protocols supported by the parser.
+- Outbound network restrictions.
+- DNS resolution.
+- Internal network segmentation.
+- Authentication requirements.
+- Proxy configuration.
+- Application-level access controls.
+- Cloud infrastructure controls.
+
+### Safe SSRF validation
+
+Use only:
+
+- Your own controlled callback server.
+- Explicitly authorized test infrastructure.
+- Approved internal test systems.
+- Non-sensitive endpoints.
+
+Do not probe production internal addresses, metadata services, or administrative interfaces without explicit authorization.
+
+A callback proves an outbound interaction, not unrestricted internal network access.
+
+---
+
+# PART 3 — FINDING XML ATTACK SURFACES
+
+## 10. The Most Important Discovery Principle
+
+Do not search only for endpoints that explicitly accept `application/xml`.
+
+Many XXE vulnerabilities exist in hidden XML-processing components.
+
+The correct question is:
+
+**Where does user-controlled data eventually reach an XML parser?**
+
+The input may be XML from the beginning, or it may be embedded inside another file or transformed into XML by the application.
+
+## 11. Direct XML Endpoints
+
+Look for endpoints that accept or return XML.
+
+Common content types:
+
+```text
+application/xml
+text/xml
+application/soap+xml
+application/xhtml+xml
+application/rss+xml
+application/atom+xml
+application/samlassertion+xml
+application/atomsvc+xml
+```
+
+Potential endpoint patterns:
+
+```text
+/api/xml
+/api/import
+/api/export
+/api/validate
+/api/convert
+/api/parse
+/api/submit
+/soap
+/ws
+/service
+/upload
+/feed
+/sitemap
+```
+
+These are discovery hints, not proof that an endpoint exists or uses an unsafe parser.
+
+### What to inspect
+
+- Request Content-Type.
+- Response Content-Type.
+- XML declarations.
+- SOAP envelopes.
+- XML namespaces.
+- XML-related error messages.
+- File upload behavior.
+- Import and export workflows.
+- API documentation.
+- Application JavaScript.
+- Mobile application traffic.
+- Third-party integrations.
+
+## 12. Content-Type Manipulation
+
+Some applications choose their parser based on the HTTP Content-Type.
+
+Others inspect the body, file extension, or content signature.
+
+A JSON endpoint may contain an alternate XML processing path.
+
+For example, test an endpoint that normally accepts form data or JSON with an XML request body, but only where its functionality suggests XML support.
+
+Possible content types to investigate:
+
+```http
+Content-Type: application/xml
+Content-Type: text/xml
+Content-Type: application/soap+xml
+Content-Type: application/xhtml+xml
+```
+
+Also compare behavior with the endpoint's original content type.
+
+### Important distinction
+
+Changing Content-Type alone does not create XXE.
+
+You must establish that the application actually parses the supplied data as XML.
+
+## 13. JSON-to-XML and Format Conversion
+
+Applications sometimes accept JSON and internally transform it into XML.
+
+Potential examples:
+
+- Legacy integration services.
+- SOAP bridges.
+- XML-based reporting systems.
+- Data import pipelines.
+- Enterprise middleware.
+- Document generation systems.
+
+Investigate endpoints that transform, validate, serialize, or exchange data with legacy services.
+
+A JSON request is not automatically an XXE attack surface. Determine whether the backend actually creates or parses XML.
+
+## 14. File Upload Attack Surfaces
+
+File uploads are among the most important places to look for hidden XML parsing.
+
+Prioritize formats that contain XML or are XML-based.
+
+### 14.1 SVG
+
+SVG is XML-based.
+
+Potential processing stages:
+
+- Image validation.
+- Thumbnail generation.
+- Image resizing.
+- Preview generation.
+- Metadata extraction.
+- Image conversion.
+- Document rendering.
+
+Test whether the server processes uploaded SVG content using an XML-capable parser.
+
+Do not assume that every SVG upload path uses an unsafe XML parser.
+
+### 14.2 DOCX
+
+DOCX is a ZIP-based Office Open XML format containing XML documents.
+
+Important internal files include:
+
+```text
+[Content_Types].xml
+word/document.xml
+word/_rels/document.xml.rels
+word/styles.xml
+word/settings.xml
+```
+
+Potential processing components:
+
+- Office document previewers.
+- Document converters.
+- Text extraction.
+- Indexing.
+- Metadata extraction.
+- Content inspection.
+- Document import.
+
+### 14.3 XLSX
+
+XLSX contains XML files describing workbook structure, worksheets, relationships, styles, and other information.
+
+Potential processing components:
+
+- Spreadsheet import.
+- Data extraction.
+- Preview generation.
+- Conversion to CSV or PDF.
+- Spreadsheet validation.
+
+### 14.4 PPTX
+
+PPTX also uses XML-based Office Open XML components.
+
+Potential processing components:
+
+- Slide preview.
+- Document conversion.
+- Text extraction.
+- Thumbnail generation.
+- Metadata extraction.
+
+### 14.5 Other Formats
+
+Investigate where applicable:
+
+- ODT.
+- ODS.
+- ODP.
+- XML-based e-book formats.
+- XLIFF.
+- GPX.
+- KML.
+- RSS.
+- Atom.
+- XML configuration packages.
+- XML-based application exports.
+
+### File-upload testing workflow
+
+1. Upload a valid baseline file.
+2. Record the normal response.
+3. Determine whether the application extracts, converts, previews, or indexes the file.
+4. Identify the XML components within the file format.
+5. Build a minimal test file that preserves the expected format structure.
+6. Introduce a controlled XML entity test in the relevant component.
+7. Upload it through the normal workflow.
+8. Monitor application behavior and controlled callbacks.
+9. Compare results with the baseline.
+10. Repeat only when a different processing component is involved.
+
+Do not modify random XML files inside an archive and assume the application will parse them.
+
+## 15. XML-Based Authentication and Identity Systems
+
+Investigate:
+
+- SAML authentication.
+- SAML response processing.
+- SAML assertion parsing.
+- XML signatures.
+- Identity-provider integrations.
+- Enterprise single sign-on.
+- WS-Security.
+- SOAP authentication.
+
+A SAML endpoint may process XML internally even when the browser interaction appears to be an ordinary login.
+
+Be careful not to confuse XXE with other SAML vulnerabilities such as signature-wrapping attacks or authentication logic flaws.
+
+## 16. Sitemap, RSS, Atom, and Feed Processing
+
+Applications may fetch or parse XML feeds.
+
+Potential workflows:
+
+- Website auditing.
+- SEO crawling.
+- Sitemap submission.
+- Feed import.
+- Content aggregation.
+- URL discovery.
+- Website monitoring.
+- Site migration.
+
+A particularly important case is a website audit tool that accepts a sitemap and parses it server-side.
+
+Test whether the application parses the submitted sitemap using a vulnerable XML parser.
+
+Other potentially relevant features:
+
+- Sitemap validation.
+- Sitemap discovery.
+- Sitemap conversion.
+- XML feed preview.
+- Feed synchronization.
+- XML-based website imports.
+
+## 17. Configuration and Integration Imports
+
+Look for functionality that accepts:
+
+- XML configuration.
+- Integration definitions.
+- API descriptions.
+- Service configuration.
+- Workflow definitions.
+- Import packages.
+- Data migration files.
+
+These may reach XML parsers through background processing.
+
+## 18. Background Processing
+
+XXE may occur after the HTTP request has completed.
+
+Examples:
+
+- Asynchronous import jobs.
+- Document conversion workers.
+- Scheduled sitemap audits.
+- Background indexing.
+- Queue-based processing.
+- Report generation.
+- Preview generation.
+
+When a request returns a job identifier, do not assume that a normal HTTP response means XML parsing did not occur.
+
+Inspect:
+
+- Job status.
+- Result endpoints.
+- Processing logs exposed to the user.
+- Notifications.
+- Generated documents.
+- Controlled OOB interactions.
+
+---
+
+# PART 4 — SYSTEMATIC DETECTION WORKFLOW
+
+## 19. Phase 1: Establish a Baseline
+
+Before injecting XML, understand normal application behavior.
+
+For every candidate endpoint:
+
+1. Send a valid request.
+2. Save the complete request and response.
+3. Record the HTTP status.
+4. Record response headers.
+5. Record the response body.
+6. Note validation errors.
+7. Note whether the operation is synchronous or asynchronous.
+8. Identify required parameters.
+9. Identify authentication requirements.
+10. Record whether the endpoint accepts user-controlled XML.
+
+The baseline is essential for identifying meaningful differences.
+
+## 20. Phase 2: Identify the XML Parser Boundary
+
+Determine where XML enters the application.
+
+Ask:
+
+- Is the request body XML?
+- Is XML contained inside an uploaded file?
+- Is the XML extracted from an archive?
+- Does the application fetch a remote XML resource?
+- Does the application convert another format into XML?
+- Is XML processed by a background worker?
+- Does a third-party library parse the data?
+- Is the XML parsed before or after authorization checks?
+
+A parser boundary may be several processing steps away from the original HTTP endpoint.
+
+## 21. Phase 3: Test Basic XML Acceptance
+
+Start with a normal XML document.
+
+```xml
+<?xml version="1.0"?>
+<root>
+  <name>XXE-Test</name>
+</root>
+```
+
+Observe:
+
+- Does the application accept XML?
+- Does it reject malformed XML?
+- Does it normalize the document?
+- Does it return parsed values?
+- Does it store the XML?
+- Does it pass the XML to another component?
+
+If the endpoint does not accept XML, investigate alternate workflows rather than repeatedly sending arbitrary XML.
+
+## 22. Phase 4: Test Internal Entity Processing
+
+Use a harmless internal entity.
+
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ENTITY marker "XXE-CONTROLLED-MARKER">
+]>
+<root>
+  <value>&marker;</value>
+</root>
+```
+
+Expected observations:
+
+- The entity is expanded.
+- The entity is preserved as a reference.
+- The DTD is rejected.
+- The parser returns an error.
+- The application strips the DTD.
+- The document is handled by a different parser.
+
+### Interpretation
+
+If the marker is expanded, you have evidence that DTD/entity processing occurs.
+
+However, internal entity expansion alone does not prove external entity resolution.
+
+If the DTD is accepted, proceed with a controlled external-resource test.
+
+## 23. Phase 5: Test External Entity Resolution
+
+Use a unique callback hostname that you control.
+
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE root [
+  <!ENTITY external SYSTEM "https://UNIQUE-CANARY.YOUR-DOMAIN.example/xxe">
+]>
+<root>
+  <value>&external;</value>
+</root>
+```
+
+Observe:
+
+- DNS events.
+- HTTP events.
+- Response changes.
+- Parser errors.
+- Background job results.
+- Timing differences.
+
+### Interpretation
+
+A correlated HTTP callback is strong evidence that an external resource was requested during processing.
+
+A DNS callback is evidence of DNS resolution, but does not independently establish successful retrieval or file access.
+
+## 24. Phase 6: Test Blind Behavior
+
+If no entity value appears in the response:
+
+1. Keep the original request unchanged except for the controlled XML test.
+2. Generate a new unique callback identifier.
+3. Submit the request.
+4. Monitor callback infrastructure.
+5. Wait for asynchronous processing if applicable.
+6. Compare the callback timestamp with the request.
+7. Repeat with a fresh identifier if the result is ambiguous.
+
+Do not conclude that the endpoint is safe just because the response does not contain entity data.
+
+## 25. Phase 7: Test External DTD Handling
+
+An external DTD reference can reveal whether the parser attempts to retrieve external DTD resources.
+
+Use a controlled DTD URL that returns a harmless, valid DTD.
+
+For example, host a DTD containing only a harmless internal marker declaration on your own test server.
+
+Then reference it:
+
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE root SYSTEM "https://UNIQUE-CANARY.YOUR-DOMAIN.example/test.dtd">
+<root>test</root>
+```
+
+Observe whether the target retrieves the DTD.
+
+This is useful because some parser configurations handle external DTDs differently from external general entities.
+
+## 26. Phase 8: Investigate Parameter Entity Handling
+
+Parameter entities are important because they are processed inside DTDs and may behave differently from general entities.
+
+For authorized detection, use a controlled external DTD containing harmless declarations and a unique callback.
+
+Determine:
+
+- Whether external parameter entities are accepted.
+- Whether the external DTD is fetched.
+- Whether nested DTD declarations are processed.
+- Whether the behavior differs from general entities.
+- Whether the parser reports a DTD processing error.
+
+Do not assume that blocking `&entity;` also blocks parameter entities.
+
+## 27. Phase 9: Test XInclude Separately
+
+XInclude is not the same as external entity resolution.
+
+A parser may disable DTD processing but still support XInclude.
+
+A harmless XInclude structure is:
+
+```xml
+<?xml version="1.0"?>
+<root xmlns:xi="http://www.w3.org/2001/XInclude">
+  <xi:include href="https://UNIQUE-CANARY.YOUR-DOMAIN.example/xinclude"
+              parse="text"/>
+</root>
+```
+
+Observe whether the target makes a controlled request.
+
+A callback may demonstrate that XInclude processing occurs.
+
+It does not automatically prove unrestricted file access.
+
+## 28. Phase 10: Test Alternate Input Representations
+
+Where the application supports them, test:
+
+- XML body.
+- SOAP envelope.
+- SVG upload.
+- XML inside ZIP archives.
+- DOCX.
+- XLSX.
+- PPTX.
+- RSS feed.
+- Atom feed.
+- Sitemap.
+- XML import file.
+- SAML request or response.
+- XML configuration import.
+
+Each representation may reach a different parser.
+
+Do not assume that a secure API parser means every document-processing library is secure.
+
+---
+
+# PART 5 — ADVANCED TESTING TECHNIQUES
+
+## 29. Parser Behavior Fingerprinting
+
+Different XML parsers have different capabilities and security defaults.
+
+Useful observations include:
+
+- Whether `DOCTYPE` is accepted.
+- Whether internal entities are expanded.
+- Whether external general entities are resolved.
+- Whether external parameter entities are resolved.
+- Whether external DTDs are loaded.
+- Whether XInclude is processed.
+- Whether entity expansion is limited.
+- Whether malformed DTDs produce detailed errors.
+- Whether external-resource access is restricted by protocol.
+
+Do not identify a parser based on one error message alone.
+
+A parser may be wrapped by an application framework or replaced by a different provider.
+
+## 30. General Entity Versus Parameter Entity Differences
+
+Test these as separate behaviors.
+
+| Feature | General entity | Parameter entity |
+|---|---|---|
+| Reference syntax | `&name;` | `%name;` |
+| Typical context | XML document content | DTD |
+| External resource support | Yes | Yes |
+| Relevant to blind XXE | Yes | Yes |
+| May be controlled separately | Yes | Yes |
+
+A parser may block one type while still permitting another.
+
+## 31. External DTD Retrieval Versus Entity Expansion
+
+These are different capabilities.
+
+An application may:
+
+- Accept an external DTD but not expand external general entities.
+- Expand internal entities but reject external entities.
+- Process external parameter entities but not general entities.
+- Disable DTD loading but support XInclude.
+- Allow entity declarations but enforce resource restrictions.
+
+Record the exact capability demonstrated.
+
+Avoid reporting a broad XXE claim when the evidence establishes only a narrower parser behavior.
+
+## 32. XML Encoding Tests
+
+XML supports several character encodings.
+
+Common examples:
+
+- UTF-8.
+- UTF-16.
+- UTF-16BE.
+- UTF-16LE.
+- ISO-8859-1.
+
+Encoding may affect:
+
+- Request parsing.
+- DTD recognition.
+- XML declaration handling.
+- Character normalization.
+- WAF inspection.
+- Application transformations.
+
+Test alternate encodings only when the application legitimately supports them or when there is a specific reason to suspect inconsistent decoding.
+
+Always verify that the application actually parsed the resulting document.
+
+## 33. XML Whitespace and Formatting
+
+XML allows whitespace in many contexts.
+
+Differences in formatting may reveal whether the application:
+
+- Parses XML directly.
+- Normalizes XML before parsing.
+- Uses string-based validation.
+- Applies a WAF before XML parsing.
+- Re-serializes XML before processing.
+
+Useful variations include:
+
+- Whitespace between declarations.
+- Newlines.
+- Attribute formatting.
+- Namespace formatting.
+- XML declaration presence or absence.
+
+Do not interpret a WAF bypass as XXE unless external resource resolution is demonstrated.
+
+## 34. Namespace Handling
+
+Namespace processing is particularly relevant to XInclude and applications that manipulate XML.
+
+Investigate:
+
+- Default namespaces.
+- Explicit namespace prefixes.
+- Namespace declarations on the root.
+- Namespace declarations on child elements.
+- Namespace normalization.
+- XML transformations.
+
+A namespace error is not proof of XXE.
+
+## 35. XML Schema and Validation
+
+Some applications validate XML using XSD schemas.
+
+Investigate whether:
+
+- Schemas are local or remote.
+- The application loads external schemas.
+- Validation triggers additional network requests.
+- Schema resolution is restricted.
+- Different validation paths use different parser configurations.
+
+Schema retrieval is a related external-resource attack surface, but a schema fetch alone should not automatically be classified as external entity injection.
+
+## 36. XML Catalogs and Custom Resolvers
+
+Some XML systems use XML catalogs or custom entity resolvers.
+
+These may redirect external references to:
+
+- Local resources.
+- Cached resources.
+- Predefined resources.
+- Internal application resources.
+
+A custom resolver can be safe when strictly allow-listed, but dangerous if it trusts user-controlled references.
+
+During source review, inspect resolver implementations and catalog configuration.
+
+## 37. Parser Chaining
+
+A single application may process the same document multiple times.
+
+Example:
+
+```text
+HTTP upload
+    |
+    v
+File type detection
+    |
+    v
+Archive extraction
+    |
+    v
+XML parser A
+    |
+    v
+Document transformation
+    |
+    v
+XML parser B
+    |
+    v
+PDF conversion
+```
+
+One parser may be secure while another is not.
+
+This is particularly relevant to:
+
+- Office document converters.
+- Image processing pipelines.
+- Document management systems.
+- XML import services.
+- Background report generators.
+
+Test the entire workflow, not only the initial request handler.
+
+## 38. Multi-Stage Processing
+
+Some XXE vulnerabilities occur only when a file is:
+
+- Uploaded.
+- Stored.
+- Queued.
+- Retrieved by a worker.
+- Converted.
+- Indexed.
+- Rendered.
+
+If the application uses asynchronous jobs, correlate the callback with the job ID and processing time.
+
+A successful upload is not proof that the file was parsed.
+
+---
+
+# PART 6 — BURP SUITE PROFESSIONAL WORKFLOW
+
+## 39. Initial Reconnaissance
+
+Use Burp Suite to identify candidate XML-processing endpoints.
+
+Recommended workflow:
+
+1. Browse the application normally.
+2. Capture requests in Proxy history.
+3. Identify uploads and imports.
+4. Identify endpoints with XML-related content types.
+5. Identify requests that trigger conversion or validation.
+6. Send interesting requests to Repeater.
+7. Save baseline requests.
+8. Maintain separate test cases for each parser path.
+
+## 40. Repeater Testing
+
+For each candidate:
+
+1. Send a valid baseline request.
+2. Record the response.
+3. Add an internal entity marker.
+4. Compare the result.
+5. Replace the marker with a controlled external entity.
+6. Monitor Collaborator.
+7. Test external DTD handling separately.
+8. Test XInclude separately.
+9. Preserve every confirmed request and response.
+
+Avoid changing multiple variables simultaneously.
+
+If you change the content type, body format, XML structure, and authentication state in one request, you may not know which change caused the result.
+
+## 41. Burp Collaborator
+
+Collaborator is useful for identifying interactions that are not reflected in HTTP responses.
+
+Recommended approach:
+
+- Generate a unique Collaborator payload for each test.
+- Use a separate identifier for each endpoint.
+- Use separate identifiers for each XML technique.
+- Record interaction type.
+- Record timestamp.
+- Correlate with the originating request.
+- Repeat ambiguous tests.
+- Avoid reusing old callback identifiers.
+
+### Evidence to preserve
+
+- Original HTTP request.
+- Modified HTTP request.
+- HTTP response.
+- Collaborator interaction record.
+- DNS interaction details.
+- HTTP interaction details.
+- Timestamp.
+- Endpoint.
+- Test identifier.
+- Processing job identifier, where applicable.
+
+## 42. Burp Intruder
+
+Intruder can help test a controlled list of candidate parameters or content-type variations.
+
+Potential use cases:
+
+- Identifying XML-accepting parameters.
+- Testing known XML import fields.
+- Comparing response behavior.
+- Testing a limited set of harmless XML markers.
+
+Avoid sending large uncontrolled payload sets to production applications.
+
+## 43. Burp Decoder
+
+Use Decoder to inspect:
+
+- URL encoding.
+- Base64.
+- XML escaping.
+- Unicode representations.
+- Encoded XML embedded in other formats.
+
+Always distinguish the data as transmitted from the data after application decoding.
+
+## 44. Burp HTTP History and Site Map
+
+Use these features to discover:
+
+- XML endpoints.
+- Upload workflows.
+- API routes.
+- Background job endpoints.
+- Feed import endpoints.
+- Document conversion functionality.
+- Requests with XML-related response types.
+
+A useful practice is to maintain a dedicated list of XML-processing candidates.
+
+---
+
+# PART 7 — COMMON FALSE NEGATIVES
+
+## 45. Why XXE Tests Sometimes Fail
+
+A failed payload does not necessarily mean that the application is secure.
+
+Possible explanations:
+
+1. The endpoint does not parse XML.
+2. The request is rejected before reaching the parser.
+3. The application parses XML using a secure parser.
+4. DTD processing is disabled.
+5. External general entities are disabled.
+6. External parameter entities are disabled.
+7. External DTD retrieval is disabled.
+8. XInclude is disabled.
+9. The parser cannot access the referenced protocol.
+10. Outbound DNS is blocked.
+11. Outbound HTTP is blocked.
+12. A proxy prevents the request.
+13. The application uses an asynchronous worker.
+14. The request reaches a different backend.
+15. The uploaded file is stored but not processed.
+16. The XML is sanitized before parsing.
+17. A WAF rejects the declaration.
+18. The document is malformed.
+19. The root element or document structure is invalid.
+20. The parser uses a different encoding than expected.
+21. The callback service is unavailable.
+22. The application suppresses errors.
+23. The parser resolves resources through a cache.
+24. The application uses a custom resolver.
+25. The test does not reach the vulnerable parser instance.
+
+## 46. Diagnostic Decision Tree
+
+```text
+Does the endpoint accept the input?
+          |
+       No | Yes
+          | 
+   Find another       Does it parse XML?
+   processing path          |
+                        No  | Yes
+                            |
+                      Find parser       Does it accept
+                      boundary          internal DTD?
+                                            |
+                                         No | Yes
+                                            |
+                                      Investigate       Does a controlled
+                                      parser behavior   external request occur?
+                                                              |
+                                                           No | Yes
+                                                              |
+                                                       Inconclusive /       External
+                                                       restricted path      resolution
+                                                                              |
+                                                                   Is there an observable
+                                                                   security impact?
+                                                                              |
+                                                                        No  | Yes
+                                                                            |
+                                                                    Further validation   Confirmed
+                                                                    needed               impact
+```
+
+## 47. Important Diagnostic Distinctions
+
+| Observation | What it establishes |
+|---|---|
+| XML accepted | XML input handling exists |
+| DOCTYPE accepted | DTD syntax may be accepted |
+| Internal marker expanded | Internal entity processing occurs |
+| External DTD fetched | External DTD retrieval occurs |
+| External entity callback received | External entity resolution is occurring or being attempted |
+| Controlled HTTP request received | An external HTTP interaction occurred |
+| Local file content returned | Local resource disclosure is demonstrated |
+| Internal service response returned | SSRF impact is demonstrated |
+| No callback received | Nothing conclusive without further investigation |
+
+---
+
+# PART 8 — ADVANCED IMPACT ASSESSMENT
+
+## 48. Local File Disclosure
+
+XXE may permit access to local files readable by the application process.
+
+Potential categories of sensitive resources include:
+
+- Application configuration.
+- Environment configuration.
+- Application logs.
+- Public system information.
+- Service configuration.
+- Application source files.
+- Deployment configuration.
+- Credential files.
+
+### Safe validation
+
+Prefer a harmless, explicitly approved test file containing a unique marker.
+
+Do not attempt to read private keys, passwords, cloud credentials, user data, or unrelated sensitive files merely to prove impact.
+
+If a program requires evidence of sensitive-file access, obtain explicit authorization and follow the program's data-handling rules.
+
+## 49. SSRF Impact
+
+XXE may cause the target to request resources accessible from its network environment.
+
+Potential security consequences:
+
+- Internal service discovery.
+- Access to internal-only resources.
+- Exposure of internal HTTP responses.
+- Interaction with administrative services.
+- Access to resources protected by network location.
+
+Validate only against authorized infrastructure.
+
+## 50. Cloud Environment Impact
+
+Cloud environments sometimes expose metadata or identity services to workloads.
+
+An XXE-to-SSRF path could potentially interact with these services, depending on network controls and workload configuration.
+
+Do not query production metadata endpoints or attempt credential extraction without explicit written authorization.
+
+For a safe assessment, establish whether the application can make an outbound request to a controlled endpoint and review architecture or configuration evidence with the program owner.
+
+## 51. Denial of Service
+
+Unsafe entity expansion can consume excessive CPU, memory, or processing time.
+
+Examples of relevant XML risks include:
+
+- Recursive entity expansion.
+- Excessive entity expansion.
+- Very large XML documents.
+- Excessive nesting.
+- Large external resources.
+- Expensive parser operations.
+
+Do not execute Billion Laughs payloads, recursive expansion tests, or large resource-consumption tests against production systems.
+
+Use a local lab or an explicitly authorized non-production environment.
+
+## 52. Authentication and Authorization Impact
+
+A file disclosure or SSRF finding may expose resources that the application process can access.
+
+The security impact depends on:
+
+- Process privileges.
+- File permissions.
+- Network access.
+- Authentication architecture.
+- Secrets management.
+- Tenant isolation.
+- Application trust boundaries.
+
+Do not assume that a file being readable by the server means that it is accessible to every user of the application.
+
+## 53. XXE and Other Vulnerabilities
+
+XXE can coexist with:
+
+- SSRF.
+- Information disclosure.
+- Path traversal.
+- XML signature issues.
+- SAML weaknesses.
+- Insecure deserialization.
+- Authorization bypass.
+- XML injection.
+- Denial of service.
+
+Investigate these relationships carefully, but report distinct vulnerabilities separately when they have independent root causes.
+
+---
+
+# PART 9 — COMMON BYPASSES AND EDGE CASES
+
+## 54. WAF and Input Filter Interference
+
+A WAF may block obvious strings such as:
+
+```text
+DOCTYPE
+ENTITY
+SYSTEM
+PUBLIC
+```
+
+However, a WAF block does not prove the backend parser is secure.
+
+Investigate the actual processing path and determine whether the parser receives the document.
+
+Do not report a WAF bypass unless you demonstrate a security-relevant parser behavior.
+
+## 55. Content-Type Confusion
+
+Some applications select a parser based on:
+
+- Content-Type.
+- File extension.
+- File signature.
+- Request parameter.
+- Multipart field.
+- Internal format detection.
+
+Compare only supported representations and determine which parser is actually used.
+
+## 56. File Extension Versus File Content
+
+A file may be accepted because of its extension but processed according to its content.
+
+The reverse can also occur.
+
+Investigate whether:
+
+- Extension validation is enforced.
+- MIME detection occurs.
+- Content signatures are checked.
+- The file is converted.
+- The parser is selected by the processing library.
+
+## 57. XML Embedded Inside Other Formats
+
+An XML document may be embedded in a ZIP archive, Office file, image, or other container.
+
+The relevant question is not whether the outer file is XML.
+
+The relevant question is whether a component inside the processing pipeline is parsed by an unsafe XML parser.
+
+## 58. XML Parser Defaults
+
+Parser defaults vary by:
+
+- Language.
+- Library.
+- Library version.
+- Operating system.
+- Framework.
+- Provider implementation.
+- Application configuration.
+
+Never assume that a parser is secure or vulnerable based only on its language or framework.
+
+Verify the exact parser and version where source access is available.
+
+## 59. Protocol Restrictions
+
+A parser may support external entities but restrict certain URI schemes.
+
+For example, a parser may:
+
+- Permit HTTP.
+- Reject local file access.
+- Reject FTP.
+- Permit local catalogs.
+- Use a custom URI resolver.
+
+Therefore, an HTTP callback does not establish local file access.
+
+## 60. Network Egress Restrictions
+
+The application may be unable to make external requests because of:
+
+- Firewall rules.
+- DNS restrictions.
+- Proxy requirements.
+- Network segmentation.
+- Container isolation.
+- Cloud egress policy.
+- Runtime configuration.
+
+No callback is not sufficient evidence that external entity processing is disabled.
+
+## 61. Cache and Retry Behavior
+
+Repeated callbacks may occur because of:
+
+- Parser retries.
+- HTTP library retries.
+- Job reprocessing.
+- Cache misses.
+- Multiple parser stages.
+- Multiple application instances.
+
+Use unique identifiers and correlate events with the request.
+
+## 62. Security Controls That Are Not Sufficient by Themselves
+
+The following controls should not be treated as complete XXE protection:
+
+- Blocking only the word `DOCTYPE`.
+- Blocking only `SYSTEM`.
+- Rejecting only `file://`.
+- Blocking only general entities.
+- Disabling external DTDs but leaving other relevant resolution paths enabled.
+- Disabling external entities but leaving XInclude enabled.
+- Relying exclusively on a WAF.
+- Relying exclusively on Content-Type validation.
+- Relying exclusively on file extension validation.
+- Assuming a newer parser is secure without verifying its configuration.
+- Enabling a generic secure-processing flag without checking its actual behavior.
+
+---
+
+# PART 10 — SOURCE CODE REVIEW
+
+## 63. What to Search For
+
+When source code is available, search for XML parser construction and configuration.
+
+### Java
+
+Potential classes and APIs:
+
+```text
+DocumentBuilderFactory
+SAXParserFactory
+XMLInputFactory
+TransformerFactory
+SchemaFactory
+SAXTransformerFactory
+XMLReader
+SAXReader
+SAXBuilder
+JAXB
+Unmarshaller
+XPath
+XMLDecoder
+```
+
+Review:
+
+- DOCTYPE handling.
+- External general entities.
+- External parameter entities.
+- External DTD loading.
+- XInclude.
+- External schema access.
+- External stylesheet access.
+- Secure-processing configuration.
+- Entity resolvers.
+- Custom parser providers.
+
+### Python
+
+Potential modules and libraries:
+
+```text
+xml.etree.ElementTree
+xml.dom.minidom
+xml.sax
+xml.parsers.expat
+lxml
+defusedxml
+```
+
+Review:
+
+- Entity resolution.
+- DTD loading.
+- Network access.
+- Parser options.
+- External resource resolvers.
+- Library version.
+- Whether untrusted XML reaches the parser.
+
+Prefer hardened parsing libraries such as `defusedxml` when appropriate.
+
+### PHP
+
+Potential functions and libraries:
+
+```text
+simplexml_load_string
+simplexml_load_file
+DOMDocument
+XMLReader
+xml_parse
+```
+
+Review:
+
+- External entity handling.
+- DTD loading.
+- Entity substitution.
+- Network access.
+- libxml configuration.
+- Parser version.
+- Error handling.
+
+### .NET
+
+Potential APIs:
+
+```text
+XmlReader
+XmlReaderSettings
+XmlDocument
+XmlTextReader
+XDocument
+XmlSchema
+XmlResolver
+```
+
+Review:
+
+- DTD processing mode.
+- Resolver configuration.
+- External resource resolution.
+- Schema validation.
+- Framework version.
+- Custom reader settings.
+
+### C and C++
+
+Potential libraries:
+
+```text
+libxml2
+Xerces-C++
+```
+
+Review:
+
+- Parser options.
+- External entity loading.
+- DTD loading.
+- Entity substitution.
+- Custom resolvers.
+- Library version.
+- Network access.
+
+## 64. Java Security Configuration
+
+For Java XML processing, review the exact factory and parser being used.
+
+Common defensive settings include:
+
+- Disallowing DOCTYPE declarations where DTDs are unnecessary.
+- Disabling external general entities.
+- Disabling external parameter entities.
+- Disabling external DTD loading.
+- Disabling XInclude.
+- Restricting external DTD and schema access.
+- Enabling secure processing.
+- Applying entity expansion and processing limits.
+
+Example configuration concepts:
+
+```java
+factory.setFeature(
+  "http://apache.org/xml/features/disallow-doctype-decl",
+  true
+);
+```
+
+Where DTDs are required, use the more specific external-entity and external-resource restrictions appropriate to the parser.
+
+Do not copy a configuration snippet blindly. Verify that the selected provider supports the features and fails securely when required controls are unavailable.
+
+## 65. Python Security Configuration
+
+For Python, prefer hardened XML parsing for untrusted input.
+
+Example:
+
+```python
+from defusedxml import ElementTree
+
+document = ElementTree.fromstring(untrusted_xml)
+```
+
+For `lxml`, review:
+
+- `resolve_entities`.
+- `load_dtd`.
+- `no_network`.
+- Parser version.
+- Custom resolvers.
+
+A safe configuration must be selected according to the application's actual parsing requirements.
+
+## 66. .NET Security Configuration
+
+For modern .NET XML parsing, review `XmlReaderSettings`.
+
+Example:
+
+```csharp
+var settings = new XmlReaderSettings
+{
+    DtdProcessing = DtdProcessing.Prohibit,
+    XmlResolver = null
+};
+```
+
+If DTD support is required, use a narrowly scoped resolver and a strict allow-list.
+
+## 67. PHP Security Review
+
+Review how the application uses libxml and PHP XML APIs.
+
+Important questions:
+
+- Is external entity loading enabled?
+- Are external resources resolved?
+- Is DTD loading required?
+- Are parser options changed globally?
+- Does a library create its own parser?
+- Does the application use old XML processing functions?
+
+Use current PHP and libxml documentation for the exact version.
+
+## 68. Configuration Consistency
+
+A secure parser configuration in one component does not protect every parser in the application.
+
+Audit:
+
+- Main API parser.
+- Upload parser.
+- Import parser.
+- Document preview parser.
+- Image parser.
+- Background worker parser.
+- SOAP client parser.
+- XML validation parser.
+- Third-party conversion libraries.
+
+This is one of the most important source-review requirements.
+
+---
+
+# PART 11 — REPORTING AND PROOF OF CONCEPT
+
+## 69. What Makes a Strong XXE Finding?
+
+A strong XXE report should establish:
+
+1. The affected endpoint or processing feature.
+2. The attacker-controlled input.
+3. The XML parser behavior.
+4. The external entity or resource-resolution behavior.
+5. The observable security impact.
+6. The affected trust boundary.
+7. The practical attack scenario.
+8. The reproducibility of the issue.
+9. The remediation.
+
+Avoid relying on a payload alone.
+
+## 70. Evidence Collection
+
+Preserve:
+
+- Target endpoint.
+- HTTP method.
+- Request headers.
+- Request body.
+- Original baseline request.
+- Modified request.
+- Response.
+- Callback evidence.
+- Callback timestamp.
+- Processing job ID.
+- Upload identifier.
+- Relevant error message.
+- Application behavior.
+- Reproduction steps.
+
+Redact secrets, tokens, cookies, personal information, and unrelated data before submitting a report.
+
+## 71. Suggested Report Structure
+
+### Title
+
+XML External Entity Injection in [Affected Feature]
+
+### Summary
+
+The affected feature processes user-controlled XML using a parser that permits unsafe external resource resolution.
+
+### Affected Endpoint
+
+Provide the endpoint, method, and relevant feature.
+
+### Preconditions
+
+Explain authentication, permissions, file format, or workflow requirements.
+
+### Steps to Reproduce
+
+1. Access the affected feature.
+2. Submit a valid baseline request.
+3. Submit the controlled XML test.
+4. Observe the parser behavior.
+5. Correlate the result with controlled callback evidence.
+
+### Proof of Concept
+
+Include a minimal reproducible request.
+
+Use a harmless controlled callback where possible.
+
+### Observed Result
+
+Explain exactly what happened.
+
+### Expected Result
+
+The application should reject unsafe DTD processing or prevent external resource resolution.
+
+### Impact
+
+Explain the demonstrated impact rather than hypothetical maximum impact.
+
+### Remediation
+
+Recommend disabling unnecessary DTD processing and external resource resolution, with parser-specific secure configuration.
+
+## 72. Severity Assessment
+
+XXE severity depends on the demonstrated impact.
+
+| Demonstrated behavior | Potential severity consideration |
+|---|---|
+| DTD accepted, no unsafe resolution demonstrated | Usually insufficient by itself |
+| Internal entity expansion only | Usually not enough to establish XXE |
+| Controlled external callback | Confirms external interaction; assess context |
+| External file disclosure | Potentially high, depending on file sensitivity |
+| SSRF to internal services | Depends on reachable services and access |
+| Sensitive credential disclosure | Potentially critical |
+| Resource exhaustion | Depends on reproducibility and impact |
+| XXE in an unauthenticated public endpoint | May increase exposure, but impact still matters |
+
+Do not assign Critical severity simply because XXE is present.
+
+## 73. Common Reporting Mistakes
+
+Avoid:
+
+- Claiming file disclosure without demonstrating it.
+- Claiming SSRF from a parser error.
+- Claiming internal network access from a DNS callback.
+- Claiming RCE without evidence.
+- Reporting a harmless internal entity as external XXE.
+- Reporting a WAF bypass without parser-level impact.
+- Reporting a `DOCTYPE` acceptance alone.
+- Including destructive denial-of-service payloads.
+- Accessing unrelated sensitive files.
+- Failing to correlate callbacks with requests.
+- Ignoring asynchronous processing.
+- Failing to distinguish a schema fetch from entity resolution.
+
+---
+
+# PART 12 — LESSONS TO APPLY WHEN STUDYING REAL-WORLD REPORTS
+
+## 74. Do Not Limit XXE Research to Classic XML APIs
+
+Real-world XXE reports frequently involve less obvious functionality.
+
+When reviewing vulnerability reports, classify the attack surface:
+
+- API request parsing.
+- File upload processing.
+- Sitemap processing.
+- Feed import.
+- Document conversion.
+- Image processing.
+- Background processing.
+- Third-party integrations.
+- Authentication protocols.
+- XML validation.
+
+The most valuable lesson is to trace the data-processing pipeline, not merely identify XML in the HTTP request.
+
+## 75. Sitemap and Website Audit Workflows
+
+For website audit functionality, examine:
+
+1. Whether a user can supply a sitemap URL or sitemap file.
+2. Whether the application retrieves or parses the sitemap.
+3. Whether XML is processed on the server.
+4. Whether the parser retrieves external resources.
+5. Whether the processing occurs in a background job.
+6. Whether callback evidence can be correlated with the submitted audit.
+7. Whether the result is reflected in the audit output.
+
+This is a particularly important attack surface for SEO platforms and website analysis services.
+
+## 76. Report Analysis Framework
+
+For every public XXE report, extract these details:
+
+| Category | What to record |
+|---|---|
+| Application | Product or service |
+| Entry point | Endpoint or feature |
+| Input type | XML, SVG, DOCX, sitemap, etc. |
+| Processing component | Parser, converter, worker, or library |
+| Root cause | Unsafe external resource resolution |
+| Entity type | General, parameter, or other mechanism |
+| Visibility | In-band, blind, or error-based |
+| OOB behavior | DNS, HTTP, or other observable event |
+| Impact | File disclosure, SSRF, or other |
+| Authentication | Required or unauthenticated |
+| Preconditions | Upload, import, job, or other workflow |
+| Detection clue | What made the vulnerability discoverable |
+| Remediation | Parser configuration or architecture change |
+
+### Important research principle
+
+Do not copy a report's exact payload and treat it as a universal test.
+
+Instead, understand:
+
+- Why the application parsed that input.
+- Which component parsed it.
+- Why the parser resolved the external resource.
+- How the researcher observed the behavior.
+- What prevented ordinary testing from finding it.
+- What the actual security impact was.
+
+This approach is much more useful for finding new XXE vulnerabilities.
+
+---
+
+# PART 13 — ADVANCED RESEARCH CHECKLIST
+
+## 77. Discovery Checklist
+
+- [ ] Identify XML endpoints.
+- [ ] Identify SOAP endpoints.
+- [ ] Identify SAML processing.
+- [ ] Identify SVG uploads.
+- [ ] Identify DOCX uploads.
+- [ ] Identify XLSX uploads.
+- [ ] Identify PPTX uploads.
+- [ ] Identify XML imports.
+- [ ] Identify sitemap processing.
+- [ ] Identify RSS and Atom feeds.
+- [ ] Identify XML configuration imports.
+- [ ] Identify document conversion.
+- [ ] Identify preview generation.
+- [ ] Identify background jobs.
+- [ ] Identify XML validation.
+- [ ] Identify remote XML retrieval.
+- [ ] Identify third-party parser dependencies.
+- [ ] Identify alternate API representations.
+
+## 78. Basic Detection Checklist
+
+- [ ] Capture a valid baseline request.
+- [ ] Verify XML parsing.
+- [ ] Test a harmless internal entity.
+- [ ] Observe entity expansion behavior.
+- [ ] Test a controlled external entity.
+- [ ] Monitor a unique callback.
+- [ ] Test external DTD retrieval separately.
+- [ ] Test parameter entity behavior.
+- [ ] Test XInclude separately.
+- [ ] Review parser errors.
+- [ ] Check asynchronous processing.
+- [ ] Correlate all observations with the originating request.
+
+## 79. Advanced Detection Checklist
+
+- [ ] Compare general and parameter entities.
+- [ ] Compare internal and external DTDs.
+- [ ] Investigate parser configuration.
+- [ ] Investigate custom resolvers.
+- [ ] Investigate XML catalogs.
+- [ ] Investigate XInclude.
+- [ ] Investigate schema resolution.
+- [ ] Investigate XML transformations.
+- [ ] Investigate archive-based XML.
+- [ ] Investigate multiple parser stages.
+- [ ] Investigate encoding differences.
+- [ ] Investigate content-type selection.
+- [ ] Investigate file-type detection.
+- [ ] Investigate asynchronous workers.
+- [ ] Investigate outbound network restrictions.
+- [ ] Investigate caching and retries.
+- [ ] Distinguish parser behavior from WAF behavior.
+
+## 80. Impact Validation Checklist
+
+- [ ] Determine whether external resolution is confirmed.
+- [ ] Determine whether local file access is demonstrated.
+- [ ] Determine whether SSRF is demonstrated.
+- [ ] Determine whether sensitive data is exposed.
+- [ ] Determine whether authentication is required.
+- [ ] Determine which user privileges are required.
+- [ ] Determine which process performs parsing.
+- [ ] Determine whether the impact is reproducible.
+- [ ] Avoid accessing unrelated sensitive resources.
+- [ ] Avoid destructive testing.
+- [ ] Record only necessary evidence.
+
+## 81. Reporting Checklist
+
+- [ ] Clear vulnerability title.
+- [ ] Affected endpoint.
+- [ ] Affected feature.
+- [ ] Authentication requirements.
+- [ ] Baseline request.
+- [ ] Modified request.
+- [ ] Minimal proof of concept.
+- [ ] Callback evidence where applicable.
+- [ ] Exact observed behavior.
+- [ ] Demonstrated impact.
+- [ ] Reproduction steps.
+- [ ] Appropriate severity.
+- [ ] Recommended remediation.
+- [ ] Redacted evidence.
+
+---
+
+# PART 14 — SAFE TESTING LAB
+
+## 82. Recommended Lab Setup
+
+Practice advanced XXE techniques in an isolated environment.
+
+A suitable lab should include:
+
+- A deliberately vulnerable XML application.
+- A secure XML application for comparison.
+- A local callback server.
+- A test DNS domain or controlled interaction service.
+- Burp Suite.
+- A local file containing harmless test data.
+- A logging mechanism.
+- A separate test network.
+
+Useful learning environments:
+
+- PortSwigger Web Security Academy XXE labs.
+- OWASP Web Security Testing Guide.
+- OWASP XML Security Cheat Sheet.
+- OWASP XXE Prevention Cheat Sheet.
+
+Do not practice destructive XML payloads against public applications.
+
+## 83. Controlled Test File
+
+Create a harmless file in the local lab:
+
+```text
+XXE-LAB-CANARY
+This file is only for authorized XML parser testing.
+```
+
+Use it to understand how local resource access behaves in your lab.
+
+Do not substitute sensitive production files.
+
+## 84. Lab Objectives
+
+Complete these exercises:
+
+1. Identify an XML parser.
+2. Test internal entity expansion.
+3. Test external general entity behavior.
+4. Test external DTD retrieval.
+5. Test parameter entities.
+6. Test blind XXE.
+7. Test controlled OOB callbacks.
+8. Test error-based behavior.
+9. Test XInclude.
+10. Test SVG processing.
+11. Test XML inside an Office document.
+12. Compare vulnerable and hardened parser configurations.
+13. Review parser security settings in source code.
+14. Write a complete vulnerability report.
+
+---
+
+# PART 15 — REMEDIATION AND DEFENSE
+
+## 85. Primary Remediation
+
+The strongest general defense is to disable DTD processing entirely for untrusted XML when the application does not require it.
+
+Where DTD functionality is genuinely necessary:
+
+- Disable external general entities.
+- Disable external parameter entities.
+- Disable external DTD loading unless specifically required.
+- Disable XInclude unless specifically required.
+- Restrict external schema and stylesheet access.
+- Apply entity expansion and resource limits.
+- Use a strict allow-list for required external resources.
+
+## 86. Defense in Depth
+
+Parser configuration is the primary control, but additional controls are important.
+
+- Run XML processing under a least-privileged account.
+- Restrict access to sensitive files.
+- Restrict outbound network access.
+- Separate document-processing workers from sensitive application services.
+- Keep XML libraries updated.
+- Apply resource limits.
+- Monitor unexpected outbound requests.
+- Validate uploaded file formats.
+- Review third-party document-processing libraries.
+- Apply security controls to background workers.
+- Test every parser instance independently.
+
+## 87. Important OWASP Guidance
+
+OWASP recommends disabling DTD processing for untrusted XML. If DTDs are genuinely required, external entity resolution and external resource access should be restricted using the parser's specific security controls.
+
+A generic secure-processing setting should not be assumed to replace all external-resource restrictions.
+
+A custom resolver must fail closed. Returning a null resolver result in some parser APIs may allow default resolution to continue.
+
+Review the exact parser provider and API behavior.
+
+---
+
+# PART 16 — FINAL XXE TESTING METHODOLOGY
+
+## 88. Recommended End-to-End Workflow
+
+Use the following sequence during an authorized assessment.
+
+```text
+1. Reconnaissance
+      |
+      v
+2. Identify XML-capable functionality
+      |
+      v
+3. Map the input and processing pipeline
+      |
+      v
+4. Capture a valid baseline
+      |
+      v
+5. Confirm XML parsing
+      |
+      v
+6. Test internal entity behavior
+      |
+      v
+7. Test external entity behavior
+      |
+      v
+8. Test controlled OOB interaction
+      |
+      v
+9. Test external DTD and parameter entities
+      |
+      v
+10. Test XInclude independently
+      |
+      v
+11. Investigate uploads and embedded XML
+      |
+      v
+12. Investigate asynchronous processing
+      |
+      v
+13. Determine actual security impact
+      |
+      v
+14. Preserve reproducible evidence
+      |
+      v
+15. Write the vulnerability report
+```
+
+## 89. Final Principles
+
+1. XXE testing starts with attack-surface discovery, not payload spraying.
+2. XML may be hidden inside other formats.
+3. File uploads can reach XML parsers indirectly.
+4. Background jobs may perform XML processing after the HTTP response.
+5. Internal entity expansion does not prove external entity resolution.
+6. DOCTYPE acceptance alone does not prove exploitable XXE.
+7. General and parameter entities must be considered separately.
+8. External DTD retrieval and external entity expansion are distinct behaviors.
+9. XInclude must be tested independently.
+10. A DNS callback does not prove file disclosure.
+11. An HTTP callback does not prove unrestricted SSRF.
+12. A parser error does not automatically prove a vulnerability.
+13. A failed callback does not prove the parser is safe.
+14. Different parser instances may have different configurations.
+15. Third-party libraries can introduce hidden XML processing.
+16. WAF filtering is not a replacement for secure parser configuration.
+17. Content-Type validation is not a replacement for secure parser configuration.
+18. Parser security defaults vary across versions and providers.
+19. Always distinguish confirmed impact from theoretical impact.
+20. Use harmless canaries and controlled infrastructure.
+21. Never perform destructive entity expansion tests on production systems.
+22. Report the actual vulnerability and its demonstrated impact.
+23. Verify remediation across every XML-processing component.
+
+---
+
+# REFERENCE MATERIAL
+
+Use these primary references to verify parser-specific behavior and keep the testing methodology current.
+
+1. OWASP Web Security Testing Guide — XML Injection / XXE  
+   https://owasp.org/www-project-web-security-testing-guide/
+
+2. OWASP XML External Entity Prevention Cheat Sheet  
+   https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html
+
+3. OWASP XML Security Cheat Sheet  
+   https://cheatsheetseries.owasp.org/cheatsheets/XML_Security_Cheat_Sheet.html
+
+4. PortSwigger — XML External Entity Injection  
+   https://portswigger.net/web-security/xxe
+
+5. PortSwigger Web Security Academy — XXE Labs  
+   https://portswigger.net/web-security/xxe
+
+6. CWE-611 — Improper Restriction of XML External Entity Reference  
+   https://cwe.mitre.org/data/definitions/611.html
+
+7. W3C — Extensible Markup Language (XML)  
+   https://www.w3.org/TR/xml/
+
+8. W3C — XML Inclusions (XInclude)  
+   https://www.w3.org/TR/xinclude/
+
+9. Oracle Java XML Security Guide  
+   https://docs.oracle.com/en/java/javase/
+
+10. Python XML Documentation  
+    https://docs.python.org/3/library/xml.html
+
+11. .NET XML Documentation  
+    https://learn.microsoft.com/en-us/dotnet/standard/data/xml/
+
+---
+
+# CONCLUSION
+
+The most effective XXE testing methodology is based on identifying every point where untrusted input reaches an XML parser, understanding the parser's actual configuration, and verifying external-resource resolution through controlled evidence.
+
+The most commonly overlooked attack surfaces are not necessarily conventional XML APIs. They include document uploads, SVG processing, Office document conversion, sitemap analysis, feed imports, authentication integrations, XML validation, and asynchronous background workers.
+
+A mature XXE assessment should therefore combine:
+
+- Application reconnaissance.
+- XML-processing pipeline analysis.
+- Parser behavior fingerprinting.
+- In-band testing.
+- Blind and out-of-band testing.
+- External DTD analysis.
+- Parameter entity analysis.
+- XInclude testing.
+- File-upload testing.
+- Source-code review.
+- Impact validation.
+- Evidence-driven reporting.
+
+The objective is not to find a payload that produces an error. It is to prove that attacker-controlled input can influence unsafe XML resource resolution and establish the real security consequences.
