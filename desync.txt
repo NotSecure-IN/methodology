@@ -1,0 +1,2790 @@
+# ULTIMATE HTTP REQUEST DESYNCHRONIZATION ASSESSMENT METHODOLOGY
+## Version 4.2 — Validated Probe Specification
+
+**Scope:** HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3, QUIC, reverse proxies, load balancers, CDNs, API gateways, application servers, browser-facing infrastructure, protocol translation, response queues, WebSocket upgrades, CONNECT tunnels, and related connection-state handling.
+
+**Purpose:** Identify, validate, classify, reproduce, and document HTTP request-boundary desynchronization and related parser inconsistencies.
+
+**Testing requirement:** Use only systems for which you have explicit authorization. Prefer a dedicated test environment, controlled frontend/backend infrastructure, synthetic endpoints, and a separate test client. Do not use unrelated users' requests as test traffic, and do not attempt shared-connection poisoning against real users.
+
+---
+
+# PART 1 — CORE PRINCIPLES
+
+## 1.1 What HTTP desynchronization means
+
+HTTP desynchronization occurs when two components processing the same connection or translated request stream disagree about where one message ends and another begins.
+
+A typical architecture may look like:
+
+```text
+Test Client
+    |
+    v
+CDN / WAF
+    |
+    v
+Reverse Proxy
+    |
+    v
+Load Balancer
+    |
+    v
+Protocol Translator
+    |
+    v
+Application Server
+```
+
+Each layer may independently parse, normalize, translate, buffer, or forward HTTP messages.
+
+A vulnerability becomes possible when one layer believes a request has ended while another layer believes that the same request has not ended, or when one layer assigns bytes to a different message than another layer does.
+
+Examples include:
+
+- One component uses `Content-Length`, while another uses `Transfer-Encoding`.
+- One component accepts a message that another rejects.
+- A proxy and backend disagree about duplicate or malformed framing headers.
+- A protocol translator generates a downstream request with different body boundaries.
+- A response parser leaves bytes in a persistent connection's response queue.
+- A browser-facing intermediary and an origin disagree about request boundaries.
+- A connection changes protocol state during an upgrade or tunnel transition.
+
+**Important:** A malformed request, parser error, timeout, HTTP 400, HTTP 502, HTTP 500, connection reset, or different response is not by itself proof of request smuggling.
+
+The essential question is:
+
+> Did two components assign different message boundaries or message ownership to the same byte stream, and can that disagreement be demonstrated?
+
+## 1.2 The evidence hierarchy
+
+Use the following evidence hierarchy when deciding whether a finding is real.
+
+| Evidence | Meaning | Desync confirmed? |
+|---|---|---|
+| Different status codes | Components may handle input differently | No |
+| Different response headers | Normalization or routing may differ | No |
+| Different parser errors | Parser behavior differs | No |
+| Different connection close behavior | Connection-state handling differs | No |
+| Different body consumption | Potential framing disagreement | Not necessarily |
+| Downstream parser receives unexpected bytes | Downstream framing anomaly | Not necessarily |
+| Backend processes a request at a different boundary than the frontend | Boundary disagreement | Yes, if directly evidenced |
+| Controlled subsequent request is consumed as part of another request | Boundary disagreement | Yes |
+| Controlled request receives a response intended for another request | Response association issue | Yes, for response-side desync |
+| Demonstrated cross-request impact | Security consequence | Impact confirmed |
+
+## 1.3 The fundamental rule
+
+Never classify a probe as a confirmed desynchronization merely because it produces unusual behavior.
+
+A strong finding should establish:
+
+1. The exact bytes sent by the test client.
+2. How the frontend parsed or transformed those bytes.
+3. How the downstream component parsed or transformed them.
+4. Where the two interpretations diverged.
+5. How the divergence affected a subsequent controlled request or response.
+6. Whether the result is reproducible.
+
+---
+
+# PART 2 — CLASSIFICATION SYSTEM
+
+Use these classifications consistently throughout the assessment.
+
+## 2.1 `PROTOCOL_VIOLATION`
+
+The request or frame sequence violates the relevant protocol specification.
+
+Examples:
+
+- Invalid HTTP/2 frame ordering.
+- Invalid HTTP/3 frame sequence.
+- Malformed chunk syntax.
+- Invalid header field syntax.
+- DATA after a stream has ended.
+- Invalid or inconsistent protocol state transitions.
+
+A protocol violation is not automatically a security vulnerability.
+
+## 2.2 `NORMALIZATION_DIFFERENCE`
+
+Two components normalize the same input differently, but no message-boundary disagreement has been demonstrated.
+
+Examples:
+
+- Header-name case normalization.
+- Whitespace normalization.
+- Header ordering changes.
+- Equal duplicate `Content-Length` fields being combined or normalized.
+- Different treatment of optional whitespace.
+
+This can be security-relevant, but requires additional evidence.
+
+## 2.3 `PARSER_DIFFERENTIAL`
+
+Two components interpret a request or response differently, but the difference has not yet been shown to affect message boundaries.
+
+Examples:
+
+- One parser accepts an extension another parser rejects.
+- One parser interprets a header value differently.
+- One component accepts an unusual but valid syntax variant.
+- A protocol translator changes a header representation.
+
+## 2.4 `DOWNSTREAM_FRAMING_ANOMALY`
+
+The downstream component exhibits unexpected framing behavior, but a subsequent message boundary or message ownership difference has not been conclusively demonstrated.
+
+Examples:
+
+- Backend waits for additional bytes.
+- Backend consumes an unexpected number of bytes.
+- Backend reports a body-length mismatch.
+- Backend closes a connection after receiving a request.
+- Backend receives malformed trailing bytes.
+
+This classification is important because it prevents premature claims of confirmed desynchronization.
+
+## 2.5 `BOUNDARY_DESYNC_CONFIRMED`
+
+There is direct evidence that two components assign different boundaries or ownership to the same request-stream bytes.
+
+Examples:
+
+- Frontend considers the first request complete, while backend consumes bytes belonging to the controlled next request as part of the first request.
+- Frontend considers bytes part of a body, while backend processes those bytes as a separate request.
+- A controlled subsequent request is parsed at a different boundary downstream.
+- The frontend and backend demonstrably disagree about the number or boundaries of messages in a connection.
+
+## 2.6 `IMPACT_CONFIRMED`
+
+The confirmed boundary disagreement produces a demonstrated security consequence.
+
+Potential consequences include:
+
+- Request queue poisoning.
+- Cross-request response association.
+- Unexpected routing.
+- Authentication-context confusion.
+- Cache behavior manipulation.
+- Request interference.
+- Security-control bypass.
+- Access to an unintended application route.
+- Controlled request misassociation.
+
+The exact impact depends on the architecture and must be demonstrated rather than assumed.
+
+## 2.7 `INCONCLUSIVE`
+
+The available evidence is insufficient to determine whether a parser differential or boundary disagreement exists.
+
+Examples:
+
+- Timing-only observations.
+- Inconsistent results.
+- No backend visibility.
+- Connection reuse cannot be established.
+- The request may have been retried.
+- A CDN may have terminated the connection.
+- The test endpoint does not provide enough observability.
+
+---
+
+# PART 3 — TEST ENVIRONMENT AND OBSERVABILITY
+
+## 3.1 Preferred testing topology
+
+The ideal environment has:
+
+- A controlled client.
+- A frontend proxy or gateway.
+- A backend HTTP server.
+- A dedicated test hostname.
+- A controlled canary endpoint.
+- Frontend request logs.
+- Backend request logs.
+- Connection and stream identifiers.
+- Raw request capture where possible.
+- A way to correlate requests across components.
+
+Example:
+
+```text
+Controlled Client
+       |
+       v
+Frontend Proxy
+       |
+       v
+Backend Test Server
+       |
+       v
+Canary Logging Endpoint
+```
+
+Do not assume that a public CDN or reverse proxy exposes its internal parser decisions. If backend visibility is unavailable, explicitly state the limits of the evidence.
+
+## 3.2 Required canary endpoints
+
+Create controlled endpoints that return a unique identifier and record the request details.
+
+Suggested endpoints:
+
+```text
+/__desync/health
+/__desync/echo
+/__desync/canary/A
+/__desync/canary/B
+/__desync/canary/C
+/__desync/body-inspect
+/__desync/header-inspect
+/__desync/connection-state
+/__desync/response-queue
+```
+
+Each endpoint should record:
+
+- Unique request ID.
+- Request method.
+- Request target.
+- HTTP version received.
+- Headers as received by the application.
+- Body length.
+- Body hash.
+- Body bytes, if safe and appropriate.
+- Arrival timestamp.
+- Backend connection ID.
+- Stream ID, if applicable.
+- Request completion status.
+- Whether the request was retried.
+- Whether the connection was reused.
+
+Example canary response:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Cache-Control: no-store
+Connection: keep-alive
+
+{
+  "request_id": "CANARY-B",
+  "method": "GET",
+  "path": "/__desync/canary/B"
+}
+```
+
+Use unique identifiers for every test. Do not rely only on response status codes.
+
+## 3.3 Frontend and backend correlation
+
+The most useful evidence is a correlated record of what each hop received and forwarded.
+
+Record:
+
+```text
+Test ID:
+Client connection:
+Frontend connection:
+Frontend request sequence:
+Frontend parsed body length:
+Frontend request completion:
+Frontend downstream bytes:
+Backend connection:
+Backend request sequence:
+Backend parsed body length:
+Backend request completion:
+Backend response association:
+Connection close/reuse:
+```
+
+Do not assume that connection IDs are identical across hops. A proxy may terminate one connection and create another.
+
+Correlate using:
+
+- Unique canary paths.
+- Explicit test identifiers.
+- Timestamps.
+- Request sequence numbers.
+- Backend connection IDs.
+- Stream IDs.
+- Body hashes.
+- Controlled request ordering.
+
+## 3.4 Baseline testing
+
+Before sending unusual requests, establish normal behavior.
+
+Test:
+
+1. Ordinary GET.
+2. Ordinary POST with no body.
+3. POST with a small body.
+4. POST with a larger body.
+5. POST with `Content-Length`.
+6. POST with valid chunked transfer encoding.
+7. Persistent connections.
+8. Separate connections.
+9. Sequential requests on one connection.
+10. Requests with different HTTP versions.
+11. Normal redirects.
+12. Normal protocol upgrades, if supported.
+
+Record expected results and repeat each baseline enough times to identify normal variability.
+
+## 3.5 Connection controls
+
+For every test, record whether the client:
+
+- Opened a fresh TCP connection.
+- Reused an existing connection.
+- Reused a TLS session.
+- Used HTTP/2 multiplexing.
+- Used HTTP/3 streams.
+- Was transparently retried.
+- Followed redirects.
+- Reconnected after an error.
+
+A client-side connection setting does not necessarily control the proxy-to-backend connection.
+
+For example, disabling client connection reuse does not prove that the reverse proxy will create a new backend connection for every request.
+
+---
+
+# PART 4 — EXACT BYTE ACCOUNTING
+
+## 4.1 Why byte accounting is mandatory
+
+HTTP framing depends on bytes, not visual character counts.
+
+Potential sources of mistakes include:
+
+- `\r\n` versus `\n`.
+- UTF-8 multibyte characters.
+- Missing final CRLF.
+- Incorrect chunk lengths.
+- Incorrect `Content-Length`.
+- Incorrect body boundaries.
+- Accidental whitespace.
+- Shell escaping.
+- Client libraries rewriting headers.
+
+Always calculate lengths from the exact bytes that will be sent.
+
+## 4.2 Python byte-construction helper
+
+Use a byte-oriented helper instead of manually estimating lengths.
+
+```python
+#!/usr/bin/env python3
+
+def request_bytes(
+    method: bytes,
+    target: bytes,
+    host: bytes,
+    headers: list[tuple[bytes, bytes]],
+    body: bytes = b"",
+) -> bytes:
+    lines = [
+        method + b" " + target + b" HTTP/1.1",
+        b"Host: " + host,
+    ]
+
+    for name, value in headers:
+        if b"\r" in name or b"\n" in name:
+            raise ValueError("Invalid header name")
+        if b"\r" in value or b"\n" in value:
+            raise ValueError("Invalid header value")
+        lines.append(name + b": " + value)
+
+    return b"\r\n".join(lines) + b"\r\n\r\n" + body
+
+
+def show_request(label: str, data: bytes) -> None:
+    print(f"\n--- {label} ---")
+    print("Total bytes:", len(data))
+    print("Hex:")
+    print(data.hex(" "))
+    print("Representation:")
+    print(repr(data))
+
+
+def content_length(body: bytes) -> int:
+    return len(body)
+
+
+def chunk(data: bytes) -> bytes:
+    return (
+        format(len(data), "x").encode("ascii")
+        + b"\r\n"
+        + data
+        + b"\r\n"
+    )
+
+
+def chunked_body(*chunks: bytes) -> bytes:
+    result = b"".join(chunk(item) for item in chunks)
+    return result + b"0\r\n\r\n"
+
+
+if __name__ == "__main__":
+    body = b"hello"
+
+    req = request_bytes(
+        b"POST",
+        b"/__desync/body-inspect",
+        b"test.example",
+        [
+            (b"Content-Length", str(len(body)).encode()),
+            (b"Content-Type", b"text/plain"),
+        ],
+        body,
+    )
+
+    show_request("Ordinary POST", req)
+```
+
+This helper is for constructing and inspecting test bytes. It does not establish how a proxy or backend will parse them.
+
+## 4.3 Raw transport considerations
+
+For HTTP/1.1 byte-level testing, prefer a controlled raw TCP/TLS client or a purpose-built test harness.
+
+Do not assume that a high-level HTTP client preserves:
+
+- Duplicate headers.
+- Header ordering.
+- Invalid syntax.
+- Conflicting framing headers.
+- Exact CRLF sequences.
+- Connection reuse behavior.
+- Body bytes following a terminating chunk.
+
+Verify the transmitted bytes with a capture or controlled server.
+
+For TLS, packet captures without TLS decryption will not show HTTP plaintext. Use a controlled TLS endpoint, TLS key logging where supported, or application-level instrumentation.
+
+---
+
+# PART 5 — HTTP/1.1 REQUEST-FRAMING ASSESSMENT
+
+## 5.1 General HTTP/1.1 framing rules
+
+Important framing elements include:
+
+- `Content-Length`
+- `Transfer-Encoding`
+- Chunked transfer coding
+- Message body termination
+- Connection persistence
+- Header parsing
+- Duplicate header handling
+- Request completion
+- Invalid-message handling
+
+The assessment must distinguish:
+
+1. Valid framing syntax.
+2. Invalid framing syntax.
+3. Ambiguous framing.
+4. Parser normalization.
+5. Actual downstream boundary disagreement.
+
+## 5.2 Baseline: ordinary Content-Length
+
+Example:
+
+```http
+POST /__desync/body-inspect HTTP/1.1
+Host: test.example
+Content-Type: text/plain
+Content-Length: 5
+
+hello
+```
+
+Expected baseline:
+
+- The body is exactly five octets.
+- The request completes normally.
+- A subsequent request begins after the five body octets.
+- The backend records the expected body hash.
+
+Classification: `NORMAL_BASELINE`.
+
+## 5.3 Baseline: valid chunked transfer coding
+
+Example:
+
+```http
+POST /__desync/body-inspect HTTP/1.1
+Host: test.example
+Transfer-Encoding: chunked
+Content-Type: text/plain
+
+5
+hello
+0
+```
+
+The displayed line breaks above represent CRLF framing. The actual bytes must contain:
+
+```text
+5\r\n
+hello\r\n
+0\r\n
+\r\n
+```
+
+Expected behavior:
+
+- The chunk size is hexadecimal.
+- The chunk data is exactly five octets.
+- The zero-sized chunk terminates the chunked body.
+- The final empty trailer section terminates the message.
+
+Classification: `NORMAL_BASELINE`.
+
+## 5.4 Probe H1-101 — CL.TE differential
+
+**Objective:** Determine whether the frontend uses `Content-Length` while a downstream component uses `Transfer-Encoding`.
+
+This is a topology-dependent test. The following is a controlled test pattern, not a universal payload guaranteed to work against every proxy chain.
+
+Construct the body as:
+
+```python
+body = (
+    b"0\r\n"
+    b"\r\n"
+    b"GET /__desync/canary/A HTTP/1.1\r\n"
+    b"Host: test.example\r\n"
+    b"Connection: keep-alive\r\n"
+    b"\r\n"
+)
+```
+
+Then calculate the Content-Length from the complete body:
+
+```python
+headers = [
+    (b"Content-Length", str(len(body)).encode("ascii")),
+    (b"Transfer-Encoding", b"chunked"),
+]
+```
+
+Construct the request with the byte helper.
+
+**Intended differential:**
+
+- A CL-based parser may consume the complete declared body.
+- A TE-based parser may terminate the chunked body at the zero-sized chunk.
+- Bytes after the chunk terminator may therefore be interpreted differently by the two components.
+
+**What to observe:**
+
+1. Did the frontend accept or reject the request?
+2. Did the frontend forward the original framing headers or normalize them?
+3. Did the backend receive `Transfer-Encoding`, `Content-Length`, or a rewritten request?
+4. Did the backend receive the canary request as a separate request?
+5. Did the backend instead treat it as body data?
+6. Did the connection close before the next request?
+7. Did the controlled canary receive its own response?
+
+**Do not claim success** merely because the frontend returns a response or the backend logs an error.
+
+Required classification:
+
+- Parser behavior only: `PARSER_DIFFERENTIAL`.
+- Unexpected downstream consumption without a proven boundary effect: `DOWNSTREAM_FRAMING_ANOMALY`.
+- Different frontend/backend message boundaries: `BOUNDARY_DESYNC_CONFIRMED`.
+- Demonstrated security consequence: `IMPACT_CONFIRMED`.
+
+## 5.5 Probe H1-102 — TE.CL differential
+
+**Objective:** Determine whether the frontend uses chunked framing while a downstream component uses `Content-Length`.
+
+Do not use a fixed payload copied from a generic list without validating its byte layout against the actual topology.
+
+A valid TE.CL test must establish all of the following:
+
+1. The frontend's chunk parser reaches a specific end-of-body position.
+2. The backend's Content-Length parser consumes a different number of bytes.
+3. The remaining bytes are examined by the backend as a possible next message.
+4. A controlled canary request can be identified at the downstream boundary.
+5. The frontend and backend boundary interpretations can be compared.
+
+Use a topology-specific generator:
+
+```python
+def make_te_cl_candidate(
+    target: bytes,
+    host: bytes,
+    backend_content_length: int,
+    chunked_body: bytes,
+) -> bytes:
+    headers = (
+        b"POST " + target + b" HTTP/1.1\r\n"
+        b"Host: " + host + b"\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"Content-Length: "
+        + str(backend_content_length).encode("ascii")
+        + b"\r\n"
+        b"Connection: keep-alive\r\n"
+        b"\r\n"
+    )
+    return headers + chunked_body
+```
+
+This function deliberately does not guess the Content-Length value. The value must be selected from the actual test design and validated against the exact bytes and parser behavior.
+
+**Validation procedure:**
+
+- First send a valid chunked request without conflicting framing.
+- Confirm how the frontend transforms it.
+- Confirm whether the backend receives a chunked request or a decoded body with a newly generated Content-Length.
+- If the frontend normalizes the request, the original TE.CL test may not reach the backend as intended.
+- If the backend receives conflicting framing, establish which framing it honors.
+- Use a controlled second request to determine the actual downstream boundary.
+
+**Important:** Do not label an arbitrary malformed chunked request as TE.CL. A real TE.CL result requires evidence of different framing decisions.
+
+## 5.6 Probe H1-103 — Duplicate Content-Length
+
+Test these cases separately:
+
+### Case A: Equal duplicate values
+
+```http
+POST /__desync/body-inspect HTTP/1.1
+Host: test.example
+Content-Length: 5
+Content-Length: 5
+
+hello
+```
+
+Record whether the frontend and backend:
+
+- Reject the request.
+- Preserve both fields.
+- Combine the values.
+- Normalize to one field.
+- Forward a rewritten request.
+
+Equal duplicate values may be rejected or normalized according to implementation behavior. Record the exact result.
+
+### Case B: Conflicting duplicate values
+
+```http
+POST /__desync/body-inspect HTTP/1.1
+Host: test.example
+Content-Length: 5
+Content-Length: 6
+
+hello!
+```
+
+Conflicting Content-Length values must not be treated as a normal valid request. RFC 9112 requires invalid framing to be rejected or handled safely; a recipient must not allow conflicting framing to create ambiguous message boundaries.
+
+**Do not interpret a rejection as a vulnerability.**
+
+A security-relevant result requires evidence that different components process the same bytes with different message boundaries.
+
+### Case C: Combined duplicate values
+
+Test a single combined field only as a separate syntax case:
+
+```http
+Content-Length: 5, 5
+```
+
+Do not assume every parser treats this identically to two separate fields.
+
+Record whether the component rejects, normalizes, or forwards it.
+
+## 5.7 Probe H1-104 — Transfer-Encoding ordering
+
+Test valid transfer-coding sequences separately from invalid or unsupported syntax.
+
+Record:
+
+- Whether the coding is supported.
+- Whether `chunked` is present.
+- Whether `chunked` is final.
+- Whether the order is accepted.
+- Whether the message is decoded or forwarded.
+- Whether a downstream component sees a different representation.
+
+Do not combine all transfer-coding variations into one test.
+
+The following are separate test categories:
+
+1. Valid supported transfer-coding sequence.
+2. Valid but unsupported coding.
+3. Invalid coding order.
+4. Duplicate `chunked`.
+5. Invalid transfer-coding token.
+6. Malformed field syntax.
+7. TE plus CL interaction.
+
+A parser rejecting an unsupported coding is not a desync.
+
+## 5.8 Probe H1-105 — CL.0 and early-response behavior
+
+**Objective:** Determine whether a server responds before consuming the request body and whether it safely handles the remaining body bytes.
+
+A server sending an early response is not automatically vulnerable.
+
+A persistent server must either consume the entire request body or close the connection after responding, so that remaining body bytes cannot be mistaken for another request.
+
+Test using:
+
+- A controlled endpoint that responds early.
+- A known body length.
+- A body that is deliberately delayed in a controlled environment.
+- A separate controlled follow-up request.
+- Backend request logs.
+
+Record:
+
+1. Whether the response is sent before the body is fully received.
+2. Whether the server continues reading the body.
+3. Whether the connection is closed.
+4. Whether the remaining bytes are discarded safely.
+5. Whether a subsequent request is parsed at the correct boundary.
+
+Classification:
+
+- Early response with safe close: not a desync.
+- Early response with complete body consumption: not a desync.
+- Remaining bytes cause unexpected downstream parsing: investigate.
+- Demonstrated different request boundaries: `BOUNDARY_DESYNC_CONFIRMED`.
+
+## 5.9 Probe H1-106 — 0.CL and zero-length framing
+
+A `Content-Length: 0` header does not, by itself, establish a 0.CL vulnerability.
+
+A zero-length body can be valid. Bytes following the header section may simply represent the next request, depending on the connection and parser state.
+
+A meaningful test must demonstrate a disagreement between components.
+
+Test:
+
+- A frontend that may use transfer coding.
+- A backend that may use Content-Length.
+- A request where the two components are known to receive different framing representations.
+- A controlled subsequent canary request.
+- Exact body consumption at both hops.
+
+Do not label the following alone as 0.CL:
+
+```http
+POST / HTTP/1.1
+Host: test.example
+Content-Length: 0
+
+```
+
+A valid 0.CL finding requires evidence that the zero-length interpretation at one hop conflicts with the framing interpretation at another hop.
+
+## 5.10 Probe H1-107 — Chunk syntax and extensions
+
+Separate valid chunk syntax from malformed syntax.
+
+### Valid hexadecimal chunk sizes
+
+Examples:
+
+```text
+0\r\n
+\r\n
+```
+
+```text
+5\r\n
+hello\r\n
+0\r\n
+\r\n
+```
+
+A leading zero in a valid hexadecimal chunk size is not automatically malformed.
+
+### Valid chunk extensions
+
+Example:
+
+```text
+5;ext=val\r\n
+hello\r\n
+0\r\n
+\r\n
+```
+
+Chunk extensions are part of the chunk grammar. Do not classify a valid extension as a parser error merely because one implementation ignores it.
+
+### Malformed cases
+
+Test separately:
+
+- Missing CRLF after chunk data.
+- Invalid hexadecimal chunk size.
+- Invalid extension syntax.
+- Truncated chunk data.
+- Missing final zero-sized chunk.
+- Invalid trailer syntax.
+- Excessive chunk size.
+- Numeric overflow handling.
+
+For each case, determine whether the parser:
+
+- Rejects the request.
+- Closes the connection.
+- Buffers additional bytes.
+- Forwards a partially parsed message.
+- Rewrites the body.
+- Produces a downstream framing anomaly.
+
+A malformed chunk test is not a desync unless the resulting message-boundary disagreement is demonstrated.
+
+## 5.11 Probe H1-108 — Header whitespace and line parsing
+
+Test parser differences involving:
+
+- Header-name casing.
+- Optional whitespace around values.
+- Leading whitespace.
+- Trailing whitespace.
+- Obsolete line folding, where relevant.
+- Whitespace before a colon.
+- Empty header values.
+- Duplicate headers.
+- Invalid line terminators.
+- Header continuation behavior.
+
+Do not assume that every parser accepts the same syntax.
+
+For each variation, record whether the request is:
+
+- Accepted.
+- Rejected.
+- Normalized.
+- Forwarded unchanged.
+- Reconstructed with different headers.
+
+Only promote the result to a desync when the difference affects message boundaries or message ownership.
+
+---
+
+# PART 6 — HTTP/1.1 PERSISTENT CONNECTION TESTING
+
+## 6.1 Sequential-request baseline
+
+Before testing desync, establish normal sequential behavior:
+
+```text
+Connection:
+    Request A
+    Response A
+    Request B
+    Response B
+```
+
+Confirm that:
+
+- Both requests are processed.
+- Both responses correspond to the correct requests.
+- No response bytes remain unexpectedly queued.
+- The connection is not silently replaced.
+- The backend sees the expected sequence.
+
+## 6.2 Controlled follow-up requests
+
+Use unique canary paths:
+
+```text
+/__desync/canary/A
+/__desync/canary/B
+/__desync/canary/C
+```
+
+Each should return a distinct response body.
+
+For every test, determine whether:
+
+- A was processed.
+- B was processed.
+- B was processed as part of A's body.
+- B was parsed as a separate request.
+- B was processed before A completed.
+- B was never received.
+- The connection closed.
+- The response association changed.
+
+Avoid ambiguous canary endpoints that return identical responses.
+
+## 6.3 Connection isolation
+
+Run separate test batches for:
+
+1. Fresh client connection and fresh backend connection.
+2. Fresh client connection with backend pooling.
+3. Persistent client connection.
+4. Persistent backend connection.
+5. Multiple requests on one client connection.
+6. Multiple independent client connections.
+7. HTTP/2 client to HTTP/1.1 backend translation.
+8. HTTP/3 client to HTTP/1.1 backend translation.
+
+This helps identify whether the issue occurs at the frontend, protocol translator, backend, or connection pool.
+
+---
+
+# PART 7 — HTTP/2 ASSESSMENT
+
+## 7.1 HTTP/2 fundamentals
+
+HTTP/2 uses binary frames and stream identifiers.
+
+Relevant frame types include:
+
+- HEADERS
+- CONTINUATION
+- DATA
+- SETTINGS
+- WINDOW_UPDATE
+- RST_STREAM
+- PING
+- GOAWAY
+- PUSH_PROMISE
+
+HTTP/2 does not use HTTP/1.1 chunked transfer coding as its message-body framing mechanism.
+
+A frontend may translate HTTP/2 requests into HTTP/1.1 requests for a backend. This translation boundary is particularly important.
+
+## 7.2 HTTP/2 evidence requirements
+
+For every HTTP/2 test, record:
+
+- Client-side frame sequence.
+- Stream ID.
+- HEADERS flags.
+- END_HEADERS.
+- END_STREAM.
+- DATA frame sequence.
+- Flow-control behavior.
+- RST_STREAM behavior.
+- SETTINGS state.
+- Header decoding result.
+- Translated downstream request.
+- Backend request boundary.
+- Backend response mapping.
+
+A stream error is not automatically a request-smuggling vulnerability.
+
+## 7.3 Probe H2-601 — Normal request baseline
+
+Send a normal HTTP/2 request to a controlled endpoint.
+
+Verify:
+
+- Correct pseudo-header ordering.
+- Valid required pseudo-headers.
+- Correct stream lifecycle.
+- Correct END_STREAM behavior.
+- Expected backend translation.
+- Correct response association.
+
+## 7.4 Probe H2-602 — Content-Length consistency
+
+HTTP/2 may carry a Content-Length field, but the value must be consistent with the message content.
+
+Test:
+
+- Correct Content-Length.
+- Content-Length smaller than the DATA payload.
+- Content-Length larger than the DATA payload.
+- Missing Content-Length.
+- Zero-length body.
+- Empty DATA frame.
+- Multiple DATA frames whose combined payload matches Content-Length.
+
+The inconsistent cases are protocol-validation tests.
+
+Record whether the implementation:
+
+- Rejects the stream.
+- Resets the stream.
+- Closes the connection.
+- Forwards a request downstream.
+- Reconstructs a different Content-Length.
+- Produces an unexpected downstream request body.
+
+A mismatch alone is not proof of desync.
+
+## 7.5 Probe H2-603 — END_STREAM lifecycle
+
+Test:
+
+- HEADERS with END_STREAM.
+- HEADERS without END_STREAM followed by DATA.
+- Multiple DATA frames.
+- DATA with END_STREAM.
+- Trailers with END_STREAM.
+- Empty body.
+- Stream reset during body transmission.
+
+Do not send DATA after a stream has already ended and call the resulting protocol error a desync.
+
+Record whether downstream translation produces an unexpected request or body boundary.
+
+## 7.6 Probe H2-604 — HEADERS and CONTINUATION sequencing
+
+Test valid and invalid sequences separately.
+
+Valid behavior includes:
+
+- HEADERS without END_HEADERS followed by the required CONTINUATION sequence.
+- Final CONTINUATION carrying END_HEADERS.
+- Valid header block decoding.
+
+Invalid behavior includes:
+
+- Unexpected frame interleaving during a header block.
+- CONTINUATION on the wrong stream.
+- Missing completion of the header block.
+- Invalid header block encoding.
+
+A CONTINUATION after END_HEADERS is not a valid continuation of that completed header block.
+
+A protocol error is not a confirmed request desync.
+
+The security question is whether a frontend and downstream component produce different complete requests or boundaries from the accepted input.
+
+## 7.7 Probe H2-605 — Header normalization and translation
+
+Inspect how the HTTP/2 gateway handles:
+
+- Pseudo-headers.
+- Header-name casing.
+- Duplicate fields.
+- Content-Length.
+- Transfer-Encoding.
+- Connection-specific fields.
+- Host and authority.
+- Path normalization.
+- Query normalization.
+- Trailer fields.
+- Invalid field values.
+
+HTTP/2 forbids certain connection-specific header fields. A gateway may reject them or handle them according to protocol requirements.
+
+Do not assume that a forbidden field creates a downstream desync.
+
+The important evidence is the actual HTTP/1.1 request or other downstream representation generated by the gateway.
+
+## 7.8 Probe H2-606 — HTTP/2 to HTTP/1.1 translation
+
+This is one of the most important areas to assess.
+
+Record the complete translation:
+
+```text
+Client HTTP/2:
+    :method
+    :scheme
+    :authority
+    :path
+    Headers
+    DATA frames
+
+Gateway output:
+    HTTP/1.1 request line
+    Host
+    Reconstructed headers
+    Content-Length or Transfer-Encoding
+    Body bytes
+
+Backend interpretation:
+    Request boundary
+    Body length
+    Request sequence
+```
+
+Check:
+
+- Whether the gateway generates Content-Length.
+- Whether it generates chunked transfer coding.
+- Whether it buffers the complete request.
+- Whether it streams the body.
+- Whether trailers are preserved or discarded.
+- Whether the gateway closes downstream connections after errors.
+- Whether malformed input can reach the backend.
+- Whether a second controlled request is interpreted at the expected boundary.
+
+## 7.9 Probe H2-607 — Stream reset and downstream state
+
+Test stream cancellation and reset behavior.
+
+Record:
+
+- When RST_STREAM is sent.
+- Whether the frontend has already forwarded request bytes.
+- Whether the backend continues processing.
+- Whether the gateway cancels the downstream request.
+- Whether the backend connection remains reusable.
+- Whether any remaining body bytes affect a subsequent request.
+
+A stream reset or gateway error alone is not desync evidence.
+
+A meaningful result requires a demonstrated downstream request-boundary or request-association consequence.
+
+## 7.10 Probe H2-608 — Flow-control and buffering
+
+Test controlled body transmission under:
+
+- Small DATA frames.
+- Multiple DATA frames.
+- Delayed DATA frames.
+- Window updates.
+- Stream-level backpressure.
+- Connection-level backpressure.
+- Cancellation during upload.
+
+Look for:
+
+- Incorrect body accounting.
+- Request completion before the expected body is received.
+- Reuse of a backend connection while a previous request remains incomplete.
+- Unexpected downstream parsing.
+
+Timing differences alone are insufficient.
+
+## 7.11 Probe H2-609 — Trailer translation
+
+Test valid HTTP/2 trailing headers and their downstream representation.
+
+Record:
+
+- Whether the client sends trailers.
+- Whether the gateway accepts them.
+- Whether the gateway forwards them.
+- Whether it converts or discards them.
+- Whether the backend receives them as trailers or ordinary headers.
+- Whether any translation changes body completion.
+
+Do not assume that trailer differences are request smuggling.
+
+## 7.12 Probe H2-610 — SETTINGS and connection lifecycle
+
+Test:
+
+- SETTINGS changes.
+- SETTINGS acknowledgments.
+- Maximum concurrent streams.
+- Header table settings.
+- Initial flow-control window changes.
+- GOAWAY.
+- Stream creation during connection shutdown.
+- Connection termination during body upload.
+
+These are primarily connection-state tests.
+
+Promote a result to desync only when the behavior causes a demonstrable request-boundary or response-association error.
+
+## 7.13 Probe H2-611 — Multiplexed request isolation
+
+Send multiple independent controlled streams:
+
+```text
+Stream 1: /__desync/canary/A
+Stream 3: /__desync/canary/B
+Stream 5: /__desync/canary/C
+```
+
+Confirm:
+
+- Each stream receives its own response.
+- The gateway does not mix request bodies.
+- Backend requests map to the correct streams.
+- Cancellation of one stream does not corrupt another.
+- Stream completion does not affect another request's framing.
+
+Multiplexing errors may be serious, but do not automatically imply HTTP/1.1 request smuggling.
+
+---
+
+# PART 8 — HTTP/3 AND QUIC ASSESSMENT
+
+## 8.1 HTTP/3 fundamentals
+
+HTTP/3 runs over QUIC and uses independent streams.
+
+Relevant concepts include:
+
+- QUIC connection IDs.
+- Bidirectional streams.
+- Unidirectional streams.
+- HTTP/3 control streams.
+- QPACK encoder and decoder streams.
+- HEADERS frames.
+- DATA frames.
+- SETTINGS.
+- Stream cancellation.
+- GOAWAY.
+- QUIC transport errors.
+
+HTTP/3 does not use HTTP/1.1 chunked transfer coding.
+
+## 8.2 Required HTTP/3 observations
+
+Record:
+
+- QUIC connection identity.
+- Stream IDs.
+- Stream direction.
+- HTTP/3 frame sequence.
+- QPACK state.
+- Header decoding outcome.
+- DATA frame sequence.
+- Stream completion.
+- Stream cancellation.
+- Gateway translation.
+- Downstream HTTP request.
+- Backend request boundary.
+
+## 8.3 Probe H3-701 — Normal request baseline
+
+Send a normal HTTP/3 request to a controlled endpoint.
+
+Verify:
+
+- Correct request stream creation.
+- Valid HTTP/3 frame sequence.
+- Valid QPACK decoding.
+- Correct END_STREAM equivalent through stream completion.
+- Correct gateway translation.
+- Correct response mapping.
+
+## 8.4 Probe H3-702 — Content-Length and DATA consistency
+
+Test:
+
+- Correct Content-Length.
+- Missing Content-Length.
+- Content-Length smaller than DATA payload.
+- Content-Length larger than DATA payload.
+- Zero-length body.
+- Multiple DATA frames.
+- Stream termination before the declared length is satisfied.
+
+These are protocol-consistency tests.
+
+A mismatch may cause an HTTP message error or stream termination. It does not automatically prove desynchronization.
+
+## 8.5 Probe H3-703 — Stream termination and incomplete bodies
+
+Test:
+
+- Normal stream completion.
+- Stream cancellation during body upload.
+- Incomplete request body.
+- Delayed DATA.
+- Gateway shutdown during upload.
+- Backend request cancellation.
+
+Record whether the downstream request is:
+
+- Completed.
+- Aborted.
+- Buffered.
+- Forwarded partially.
+- Retried.
+- Left in an incomplete state.
+
+A backend waiting for bytes is a `DOWNSTREAM_FRAMING_ANOMALY` unless a different message boundary is demonstrated.
+
+## 8.6 Probe H3-704 — QPACK and header translation
+
+Inspect:
+
+- Dynamic table references.
+- Header decoding.
+- Header size limits.
+- Invalid references.
+- Blocked streams.
+- Header field validation.
+- Pseudo-header validation.
+- Translation to HTTP/1.1.
+
+Invalid QPACK references and invalid header blocks are protocol or decoding errors.
+
+A security-relevant header or routing difference should be reported separately unless it creates a demonstrated request-boundary consequence.
+
+## 8.7 Probe H3-705 — HTTP/3 to HTTP/1.1 translation
+
+Observe the complete translation:
+
+```text
+HTTP/3 request stream
+        |
+        v
+HTTP/3 frame decoding
+        |
+        v
+QPACK header decoding
+        |
+        v
+Gateway request representation
+        |
+        v
+HTTP/1.1 downstream serialization
+        |
+        v
+Backend parser
+```
+
+Compare:
+
+- Method.
+- Authority.
+- Path.
+- Header values.
+- Body length.
+- Body bytes.
+- Trailer behavior.
+- Request completion.
+- Backend request ordering.
+
+If the gateway translates the HTTP/3 request into a valid HTTP/1.1 request with unambiguous framing, the original HTTP/3 framing cannot simply be assumed to survive downstream.
+
+---
+
+# PART 9 — BROWSER-POWERED DESYNCHRONIZATION
+
+## 9.1 Browser tests are experiments, not deterministic wire-level tests
+
+Browser JavaScript does not provide complete control over:
+
+- TCP connection reuse.
+- HTTP/2 stream scheduling.
+- HTTP/3 connection reuse.
+- Connection coalescing.
+- Proxy-to-backend connections.
+- TLS connection state.
+- Browser connection pools.
+- Automatic retries.
+- Protocol negotiation.
+
+A successful `fetch()` call does not prove that the browser reused the same underlying connection.
+
+A `no-cors` response does not prove that a request reached a particular backend or that the response was correctly associated.
+
+Use browser tests to identify possible browser-facing behavior, then verify the transport and backend behavior independently.
+
+## 9.2 Probe BROWSER-801 — Basic fetch baseline
+
+Use a controlled endpoint:
+
+```javascript
+async function baseline() {
+  const response = await fetch(
+    "/__desync/health",
+    {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store"
+    }
+  );
+
+  console.log("Status:", response.status);
+  console.log("URL:", response.url);
+  console.log("Body:", await response.text());
+}
+```
+
+Record:
+
+- Browser version.
+- Protocol negotiated.
+- Origin.
+- Redirect behavior.
+- Request headers visible to the server.
+- Backend connection behavior, if available.
+
+## 9.3 Probe BROWSER-802 — Controlled body behavior
+
+```javascript
+async function postBody() {
+  const response = await fetch(
+    "/__desync/body-inspect",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain"
+      },
+      body: "controlled-test-body",
+      cache: "no-store"
+    }
+  );
+
+  console.log("Status:", response.status);
+  console.log(await response.text());
+}
+```
+
+This tests normal browser request-body handling.
+
+It does not allow arbitrary manipulation of forbidden framing headers. Browsers control many transport-level details.
+
+## 9.4 Probe BROWSER-803 — Redirect behavior
+
+Test redirect behavior as separate experiments:
+
+1. Redirect with a GET request.
+2. Redirect with a POST request.
+3. Redirect after a body has been sent.
+4. Redirect with different status codes.
+5. Manual redirect observation.
+6. Followed redirect observation.
+
+Example:
+
+```javascript
+async function redirectTest() {
+  const response = await fetch(
+    "/__desync/redirect-test",
+    {
+      method: "POST",
+      body: "controlled-body",
+      redirect: "follow",
+      cache: "no-store"
+    }
+  );
+
+  console.log("Status:", response.status);
+  console.log("Final URL:", response.url);
+  console.log("Redirected:", response.redirected);
+  console.log(await response.text());
+}
+```
+
+`redirect: "manual"` does not mean the browser follows the redirect. It changes how redirect handling is exposed to the calling context.
+
+Do not infer body preservation or connection reuse from JavaScript behavior alone.
+
+## 9.5 Probe BROWSER-804 — Browser connection reuse
+
+Test repeated requests to a controlled endpoint and correlate them with server-side connection identifiers.
+
+```javascript
+async function sequentialRequests() {
+  for (const name of ["A", "B", "C"]) {
+    const response = await fetch(
+      `/__desync/canary/${name}`,
+      {
+        cache: "no-store",
+        credentials: "same-origin"
+      }
+    );
+
+    console.log(name, response.status, await response.text());
+  }
+}
+```
+
+The browser may reuse a connection, use multiple streams, open another connection, or select another protocol.
+
+Only server-side or transport-level evidence can establish the actual behavior.
+
+## 9.6 Probe BROWSER-805 — Cross-origin and coalescing behavior
+
+Test only controlled domains and infrastructure.
+
+Record:
+
+- Certificate coverage.
+- DNS resolution.
+- Authority.
+- Origin.
+- Negotiated protocol.
+- Connection identity.
+- Server-side routing.
+- Backend connection mapping.
+
+Connection coalescing is a transport and origin-routing property. It is not inherently a parser differential.
+
+Same IP address and a certificate covering multiple names do not, by themselves, prove that a browser will coalesce the connections.
+
+Report cross-authority routing or origin-isolation issues separately unless a request-boundary disagreement is demonstrated.
+
+---
+
+# PART 10 — CRLF AND REQUEST-TARGET NORMALIZATION
+
+## 10.1 CRLF fundamentals
+
+HTTP/1.x message syntax uses CRLF line endings.
+
+These are different:
+
+```text
+\r\n
+```
+
+```text
+\n
+```
+
+```text
+%0d%0a
+```
+
+The third example is URL-encoded text. It becomes CRLF only if a component decodes it.
+
+Never treat URL-encoded CRLF as actual CRLF without proving where decoding occurs.
+
+## 10.2 Probe CRLF-901 — Request-target decoding
+
+Test controlled request targets containing:
+
+- Encoded CRLF.
+- Double-encoded CRLF.
+- Encoded spaces.
+- Encoded delimiters.
+- Mixed-case percent encodings.
+- Invalid percent encodings.
+- Path normalization sequences.
+
+Record each component's representation:
+
+```text
+Client request target:
+Frontend parsed target:
+Frontend normalized target:
+Downstream request target:
+Backend parsed target:
+```
+
+A request-target normalization difference is not automatically request smuggling.
+
+It may instead be:
+
+- Request splitting.
+- Header injection.
+- Routing confusion.
+- Path normalization inconsistency.
+- Cache-key inconsistency.
+
+Classify the actual issue accurately.
+
+## 10.3 Probe CRLF-902 — Header serialization
+
+Inspect whether a gateway safely serializes header values when generating downstream requests.
+
+Check:
+
+- Rejection of CR and LF in header values.
+- Header-name validation.
+- Header-value normalization.
+- Percent-decoding order.
+- Unicode handling.
+- Control characters.
+- Downstream serialization.
+
+Do not send uncontrolled header-injection payloads to shared production infrastructure.
+
+---
+
+# PART 11 — RESPONSE-SIDE DESYNCHRONIZATION
+
+## 11.1 Response-side desync fundamentals
+
+Request-side desync concerns disagreement about request boundaries.
+
+Response-side desync concerns disagreement about response boundaries or response association.
+
+A response parser may:
+
+- Consume too few bytes.
+- Consume too many bytes.
+- Leave bytes queued.
+- Treat body bytes as a subsequent response.
+- Associate a response with the wrong request.
+
+Extra bytes in a response are not sufficient evidence. The key issue is whether a later response is misassociated with a subsequent controlled request.
+
+## 11.2 Probe RESP-1001 — Normal response baseline
+
+Use a controlled endpoint that returns:
+
+- A known status.
+- A known Content-Length.
+- A unique response identifier.
+- A known body hash.
+- A known connection behavior.
+
+Send sequential requests and confirm that each receives its intended response.
+
+## 11.3 Probe RESP-1002 — Response-body boundary
+
+Test controlled response framing variations in an isolated environment.
+
+Observe:
+
+- Declared Content-Length.
+- Actual body length.
+- Transfer-Encoding, if applicable.
+- Chunk termination.
+- Connection closure.
+- Bytes remaining after response completion.
+- Next response parsing.
+- Request-to-response association.
+
+A response with extra bytes is a response-framing anomaly.
+
+To confirm response-side desynchronization, demonstrate that the next controlled request receives a response that belongs to a different request or that the response parser demonstrably assigns bytes to the wrong response boundary.
+
+## 11.4 Probe RESP-1003 — Persistent response queue
+
+Use two controlled requests with unique expected response bodies:
+
+```text
+Request A -> Expected response A
+Request B -> Expected response B
+```
+
+Record:
+
+- Request order.
+- Response order.
+- Response status.
+- Response body hash.
+- Response identifier.
+- Connection identity.
+- Whether a retry occurred.
+- Whether the client received an unexpected response.
+
+Do not use identical response bodies for A and B.
+
+## 11.5 Probe RESP-1004 — HEAD and bodyless responses
+
+Test:
+
+- HEAD responses.
+- 204 responses.
+- 304 responses.
+- Responses to CONNECT.
+- Informational responses.
+- Normal body-bearing responses.
+
+Check whether the client and intermediary agree about whether a response body is permitted.
+
+A bodyless response followed by unexpected bytes may reveal a parser issue, but the subsequent response association must be established.
+
+## 11.6 Probe RESP-1005 — Informational responses
+
+Test:
+
+- 100 Continue.
+- Other supported informational responses.
+- Multiple informational responses where valid.
+- Final response after informational responses.
+
+Verify that informational responses are not mistaken for final responses and that the final response is associated with the correct request.
+
+---
+
+# PART 12 — HTTP/1.0 AND LEGACY BEHAVIOR
+
+## 12.1 Probe LEGACY-1101 — HTTP/1.0 baseline
+
+Test ordinary HTTP/1.0 requests.
+
+Record:
+
+- Connection closure behavior.
+- Whether keep-alive is supported.
+- Whether the frontend translates to HTTP/1.1.
+- How the backend determines message completion.
+- Whether response bodies are delimited by Content-Length or connection closure.
+
+HTTP/1.0 behavior is implementation-dependent in some areas. Do not infer an off-by-one or desync from a different connection-close policy.
+
+## 12.2 Probe LEGACY-1102 — Persistent HTTP/1.0 connections
+
+If the stack supports persistent HTTP/1.0 connections, test the behavior separately.
+
+Confirm:
+
+- Which side requested keep-alive.
+- Whether the connection remains open.
+- Whether each request has an unambiguous body boundary.
+- Whether a subsequent request is parsed correctly.
+
+## 12.3 Probe LEGACY-1103 — Legacy parser normalization
+
+Inspect:
+
+- Header parsing.
+- Line endings.
+- Duplicate fields.
+- Connection tokens.
+- Content-Length.
+- Transfer-Encoding.
+- Request-target handling.
+
+Only report desync if the legacy parser's interpretation causes a demonstrable boundary disagreement.
+
+---
+
+# PART 13 — WEBSOCKET AND CONNECT TRANSITIONS
+
+## 13.1 WebSocket upgrade
+
+A WebSocket connection begins with an HTTP handshake and transitions to WebSocket framing only after a successful upgrade response.
+
+Test:
+
+- Valid handshake.
+- Invalid handshake.
+- Missing upgrade headers.
+- Invalid Connection tokens.
+- Incorrect WebSocket version.
+- Invalid key.
+- Rejected upgrade.
+- Successful upgrade.
+- Data after upgrade.
+
+Record the exact transition point at both frontend and backend.
+
+Do not interpret bytes as WebSocket frames before the upgrade has successfully completed.
+
+## 13.2 Probe UPGRADE-1201 — WebSocket handshake
+
+Verify:
+
+- Request method.
+- Upgrade header.
+- Connection header.
+- WebSocket key.
+- WebSocket version.
+- Expected 101 response.
+- Backend upgrade state.
+- Frontend upgrade state.
+
+If the upgrade is rejected, the connection remains under HTTP handling or is closed according to implementation behavior.
+
+## 13.3 Probe UPGRADE-1202 — Post-upgrade framing
+
+After a successful upgrade, verify that both sides have transitioned to WebSocket framing.
+
+Record:
+
+- Frame direction.
+- Opcode.
+- Masking.
+- Payload length.
+- Control frames.
+- Close behavior.
+- Connection state.
+
+Do not classify ordinary WebSocket framing errors as HTTP request smuggling.
+
+## 13.4 CONNECT semantics
+
+CONNECT changes connection semantics only after a successful 2xx response.
+
+Before the successful response:
+
+- The request is processed as HTTP.
+- HTTP request and response framing rules apply.
+
+After the successful response:
+
+- The connection becomes a tunnel.
+- Subsequent bytes are tunnel data, not ordinary HTTP request messages.
+
+## 13.5 Probe UPGRADE-1203 — CONNECT transition
+
+Use a controlled proxy and destination.
+
+Record:
+
+1. CONNECT request received.
+2. CONNECT request forwarded.
+3. Proxy response.
+4. Whether a successful 2xx response is returned.
+5. Exact point where tunnel mode begins.
+6. Whether the backend and frontend agree on the transition.
+7. Whether post-transition bytes are handled as tunnel data.
+
+A CONNECT request that receives a non-2xx response has not entered tunnel mode.
+
+Do not interpret post-2xx tunnel bytes as ordinary HTTP requests unless the tunnel endpoint itself parses HTTP.
+
+---
+
+# PART 14 — PROXY, CDN, WAF, AND GATEWAY INVENTORY
+
+## 14.1 Map the complete request path
+
+Document all known components:
+
+```text
+Client
+  |
+  v
+DNS / Anycast
+  |
+  v
+CDN
+  |
+  v
+WAF
+  |
+  v
+Load Balancer
+  |
+  v
+Reverse Proxy
+  |
+  v
+API Gateway
+  |
+  v
+Service Mesh
+  |
+  v
+Application Server
+```
+
+For each component, identify:
+
+- Product and version, where known.
+- Protocol accepted.
+- Protocol forwarded.
+- TLS termination.
+- Header normalization.
+- Request buffering.
+- Body streaming.
+- Connection pooling.
+- Retry behavior.
+- Timeout behavior.
+- Error handling.
+- Backend routing.
+
+## 14.2 Protocol translation matrix
+
+Create a matrix for the observed architecture.
+
+| Client protocol | Frontend behavior | Backend protocol | Test priority |
+|---|---|---|---|
+| HTTP/1.1 | HTTP/1.1 forwarding | HTTP/1.1 | High |
+| HTTP/2 | HTTP/2 forwarding | HTTP/2 | High |
+| HTTP/2 | Translation | HTTP/1.1 | Very high |
+| HTTP/3 | HTTP/3 forwarding | HTTP/3 | High |
+| HTTP/3 | Translation | HTTP/1.1 | Very high |
+| HTTP/3 | Translation | HTTP/2 | High |
+| HTTP/1.1 | Upgrade | WebSocket | Conditional |
+| HTTP/1.1 | CONNECT | Tunnel | Conditional |
+
+The highest-priority areas are often protocol translation and connection reuse because they introduce multiple independent message-processing implementations.
+
+## 14.3 Identify request transformations
+
+For each hop, record:
+
+- Original headers.
+- Removed headers.
+- Added headers.
+- Rewritten headers.
+- Body transformations.
+- Transfer-coding changes.
+- Content-Length generation.
+- Trailer handling.
+- Path rewriting.
+- Authority rewriting.
+- Retry behavior.
+- Connection pooling.
+
+A proxy may completely remove the original framing ambiguity by parsing and reconstructing the request. Do not assume that client-side ambiguity reaches the backend.
+
+---
+
+# PART 15 — DIFFERENTIAL ORACLE
+
+## 15.1 Purpose
+
+The differential oracle compares the interpretation of a test request across the frontend and backend.
+
+It should not rely only on response codes or timing.
+
+## 15.2 Required observations
+
+For each test, collect:
+
+```text
+TEST_ID
+CLIENT_REQUEST_BYTES
+CLIENT_PROTOCOL
+CLIENT_CONNECTION_ID
+FRONTEND_CONNECTION_ID
+FRONTEND_STREAM_ID
+FRONTEND_PARSED_METHOD
+FRONTEND_PARSED_TARGET
+FRONTEND_BODY_LENGTH
+FRONTEND_REQUEST_COMPLETE
+FRONTEND_DOWNSTREAM_BYTES
+BACKEND_CONNECTION_ID
+BACKEND_STREAM_ID
+BACKEND_PARSED_METHOD
+BACKEND_PARSED_TARGET
+BACKEND_BODY_LENGTH
+BACKEND_REQUEST_COMPLETE
+BACKEND_REQUEST_SEQUENCE
+RESPONSE_ID
+RESPONSE_BODY_HASH
+CONNECTION_CLOSE_STATE
+RETRY_STATE
+```
+
+## 15.3 Comparison rules
+
+Compare:
+
+1. Request count.
+2. Request order.
+3. Method.
+4. Target.
+5. Authority.
+6. Header interpretation.
+7. Body length.
+8. Body hash.
+9. Request completion.
+10. Subsequent request boundary.
+11. Response association.
+12. Connection reuse.
+
+Do not compare connection IDs across hops as if they were globally identical.
+
+## 15.4 Suggested oracle pseudocode
+
+```python
+def classify(observation):
+    if observation.protocol_invalid:
+        return "PROTOCOL_VIOLATION"
+
+    if observation.normalization_only:
+        return "NORMALIZATION_DIFFERENCE"
+
+    if observation.parser_difference and not observation.boundary_difference:
+        return "PARSER_DIFFERENTIAL"
+
+    if observation.downstream_framing_anomaly:
+        return "DOWNSTREAM_FRAMING_ANOMALY"
+
+    if observation.boundary_difference:
+        if observation.security_impact:
+            return "IMPACT_CONFIRMED"
+        return "BOUNDARY_DESYNC_CONFIRMED"
+
+    return "INCONCLUSIVE"
+```
+
+This is an illustrative classification function. Its input fields must be populated from actual observations, not inferred from a status code or timeout.
+
+## 15.5 Evidence-based boundary conditions
+
+Set `boundary_difference = True` only when there is evidence such as:
+
+- A controlled canary request being consumed as part of another request.
+- A backend parsing a request at a different byte offset than the frontend.
+- A frontend completing a request while the backend remains within that request's body.
+- A backend parsing bytes as a new request when the frontend considers them part of the previous message.
+- A response being associated with the wrong controlled request.
+
+---
+
+# PART 16 — TIMING AND PAUSE-BASED TESTING
+
+## 16.1 Timing is supporting evidence
+
+Timing can help reveal:
+
+- A parser waiting for additional body bytes.
+- A backend waiting for a message terminator.
+- Buffering behavior.
+- Delayed forwarding.
+- Timeout-triggered connection closure.
+- Different request completion policies.
+
+Timing alone is not proof of desynchronization.
+
+## 16.2 Controlled timing methodology
+
+Use:
+
+- A dedicated test server.
+- A fixed test body.
+- Known delay intervals.
+- A fixed connection policy.
+- A separate test client.
+- Server-side timestamps.
+- Repeated baseline tests.
+
+Record:
+
+```text
+T0: Client sends headers
+T1: Frontend receives headers
+T2: Frontend forwards headers
+T3: Backend receives headers
+T4: Client sends body segment
+T5: Backend receives body segment
+T6: Backend completes request
+T7: Frontend receives response
+T8: Client receives response
+```
+
+Compare these timestamps across normal and unusual test cases.
+
+## 16.3 Avoid false conclusions
+
+Do not infer a desync from:
+
+- A response arriving late.
+- A response arriving early.
+- A timeout.
+- A slow backend.
+- A rate limit.
+- A WAF challenge.
+- A retry.
+- A connection pool wait.
+- A server overloaded by concurrent requests.
+
+The timing observation must be tied to request-boundary evidence.
+
+---
+
+# PART 17 — TEST EXECUTION WORKFLOW
+
+## Phase 1: Authorization and scope
+
+Confirm:
+
+- Written authorization.
+- Target hostnames.
+- Permitted IP ranges.
+- Permitted protocols.
+- Rate limits.
+- Testing windows.
+- Whether malformed requests are permitted.
+- Whether connection-reuse testing is permitted.
+- Whether a staging environment exists.
+- Whether backend instrumentation is available.
+
+## Phase 2: Architecture discovery
+
+Determine:
+
+- Frontend technology.
+- Backend technology.
+- TLS termination points.
+- HTTP protocol negotiation.
+- Proxy chain.
+- CDN/WAF presence.
+- Protocol translation.
+- Connection pooling.
+- Request buffering.
+- Retry behavior.
+
+Do not assume technology from response headers alone.
+
+## Phase 3: Baseline
+
+Run normal HTTP/1.1, HTTP/2, and HTTP/3 requests where supported.
+
+Confirm:
+
+- Correct request processing.
+- Correct response mapping.
+- Body integrity.
+- Connection behavior.
+- Normal error handling.
+
+## Phase 4: HTTP/1.1 framing
+
+Test:
+
+1. Content-Length baseline.
+2. Chunked baseline.
+3. CL.TE differential.
+4. TE.CL differential.
+5. Duplicate Content-Length.
+6. Transfer-Encoding ordering.
+7. CL.0 behavior.
+8. 0.CL behavior.
+9. Chunk syntax.
+10. Header parsing.
+11. Persistent connection behavior.
+
+## Phase 5: HTTP/2
+
+Test:
+
+1. Normal request.
+2. Content-Length consistency.
+3. Stream lifecycle.
+4. HEADERS and CONTINUATION.
+5. Header normalization.
+6. HTTP/2-to-HTTP/1.1 translation.
+7. Stream reset.
+8. Flow control.
+9. Trailers.
+10. SETTINGS and GOAWAY.
+11. Multiplexing isolation.
+
+## Phase 6: HTTP/3
+
+Test:
+
+1. Normal request.
+2. Content-Length consistency.
+3. Stream termination.
+4. QPACK decoding.
+5. HTTP/3-to-HTTP/1.1 translation.
+6. HTTP/3-to-HTTP/2 translation.
+7. Stream cancellation.
+8. Connection lifecycle.
+9. Multiplexing isolation.
+
+## Phase 7: Browser-facing behavior
+
+Test:
+
+1. Normal fetch.
+2. Body handling.
+3. Redirect behavior.
+4. Connection reuse observations.
+5. Cross-origin routing.
+6. Coalescing, if relevant.
+7. Browser-to-proxy protocol translation.
+
+Use browser-side tests as supporting experiments and verify actual transport behavior separately.
+
+## Phase 8: CRLF and normalization
+
+Test:
+
+1. Request-target decoding.
+2. Double decoding.
+3. Header serialization.
+4. Path normalization.
+5. Authority normalization.
+6. Invalid control characters.
+7. Header whitespace.
+
+## Phase 9: Response-side behavior
+
+Test:
+
+1. Normal response framing.
+2. Content-Length consistency.
+3. Chunked response completion.
+4. Bodyless responses.
+5. Informational responses.
+6. Persistent response queue.
+7. Request-to-response association.
+
+## Phase 10: Upgrade and tunnel behavior
+
+Test:
+
+1. WebSocket handshake.
+2. Successful upgrade.
+3. Rejected upgrade.
+4. Post-upgrade framing.
+5. CONNECT success.
+6. CONNECT rejection.
+7. Tunnel transition.
+8. Post-transition data handling.
+
+## Phase 11: Reproduction and evidence
+
+For every potential issue:
+
+- Repeat the same controlled test.
+- Confirm the same frontend interpretation.
+- Confirm the same backend interpretation.
+- Verify the same boundary difference.
+- Confirm the same canary result.
+- Record any environmental variability.
+
+Three successful reproductions provide consistency evidence. They do not prove that false positives are impossible or that the test is universally reliable.
+
+## Phase 12: Reporting
+
+Report only the strongest classification supported by the evidence.
+
+---
+
+# PART 18 — FALSE POSITIVE ELIMINATION
+
+Before declaring a vulnerability, eliminate these alternatives.
+
+## 18.1 CDN or WAF behavior
+
+Could the edge component have:
+
+- Rejected the request?
+- Rewritten the request?
+- Buffered the body?
+- Retried the request?
+- Opened a new backend connection?
+- Generated the response itself?
+
+## 18.2 Backend behavior
+
+Could the backend have:
+
+- Closed the connection normally?
+- Rejected the request?
+- Timed out?
+- Sent an early response?
+- Aborted body processing?
+- Applied a body-size limit?
+- Used a different route?
+
+## 18.3 Client behavior
+
+Could the client have:
+
+- Reused a different connection?
+- Followed a redirect?
+- Retried the request?
+- Changed the HTTP version?
+- Rewritten headers?
+- Buffered the request?
+- Applied automatic decompression?
+
+## 18.4 Network behavior
+
+Could the result be caused by:
+
+- Packet loss?
+- TCP retransmission?
+- TLS interruption?
+- Proxy timeout?
+- Load balancing?
+- Backend failover?
+- Connection pool contention?
+
+## 18.5 Application behavior
+
+Could the application have:
+
+- Returned an intentional early response?
+- Ignored the request body?
+- Redirected the request?
+- Rejected the method?
+- Returned a cached response?
+- Applied authentication middleware?
+- Routed the request to another service?
+
+A confirmed desync finding should survive these alternative explanations.
+
+---
+
+# PART 19 — SECURITY IMPACT ASSESSMENT
+
+A boundary disagreement is not automatically high impact.
+
+Assess the actual consequence.
+
+## 19.1 Potential impact categories
+
+### Request queue poisoning
+
+A downstream connection processes bytes as a different request than intended.
+
+### Cross-request interference
+
+A controlled request affects the handling of another request on the same downstream connection.
+
+### Response association confusion
+
+A response intended for one request is delivered or interpreted as the response to another request.
+
+### Routing confusion
+
+Different components select different authorities, paths, or backend destinations.
+
+### Authentication-context confusion
+
+Requests are processed under an unexpected authentication or session context.
+
+### Cache interaction
+
+A cache and backend disagree about request or response boundaries, potentially affecting cache behavior.
+
+### Security-control inconsistency
+
+A WAF, proxy, or gateway evaluates a different request representation from the backend.
+
+These are possible impact categories, not assumed outcomes.
+
+## 19.2 Demonstrate impact safely
+
+Use only:
+
+- A dedicated canary endpoint.
+- Synthetic accounts.
+- Test-only credentials.
+- A dedicated backend connection.
+- Controlled test clients.
+- Non-sensitive data.
+
+Do not use unrelated users' requests, sessions, or data to prove impact.
+
+---
+
+# PART 20 — REMEDIATION GUIDANCE
+
+## 20.1 Normalize framing at trust boundaries
+
+Where possible:
+
+- Parse incoming requests once.
+- Reject ambiguous framing.
+- Generate a new unambiguous downstream request.
+- Ensure downstream framing is internally consistent.
+- Avoid forwarding conflicting framing headers.
+
+## 20.2 Reject conflicting Content-Length
+
+Reject conflicting Content-Length values.
+
+Do not allow different components to choose different values.
+
+## 20.3 Handle Transfer-Encoding consistently
+
+- Validate transfer-coding syntax.
+- Reject unsupported codings.
+- Ensure `chunked` is handled consistently.
+- Avoid ambiguous TE/CL combinations.
+- Ensure downstream serialization is valid.
+
+## 20.4 Consume or close
+
+For persistent connections, ensure the complete request body is consumed before reusing the connection, or close the connection safely.
+
+Never reuse a downstream connection whose request framing state is uncertain.
+
+## 20.5 Normalize protocol translation
+
+For HTTP/2 and HTTP/3 gateways:
+
+- Validate headers before translation.
+- Reconstruct downstream messages safely.
+- Generate correct Content-Length values.
+- Avoid forwarding invalid connection-specific headers.
+- Handle trailers consistently.
+- Cancel or close downstream work when an upstream stream is reset.
+- Do not reuse connections with uncertain parser state.
+
+## 20.6 Handle response framing consistently
+
+- Validate response Content-Length.
+- Validate chunked response completion.
+- Handle bodyless response statuses correctly.
+- Prevent extra bytes from being interpreted as a subsequent response.
+- Close connections when response framing is uncertain.
+
+## 20.7 Upgrade and tunnel transitions
+
+- Validate WebSocket handshakes.
+- Transition only after successful upgrade.
+- Treat CONNECT as a tunnel only after a successful 2xx response.
+- Keep HTTP and tunnel state transitions explicit.
+- Do not reuse a connection with an uncertain transition state.
+
+---
+
+# PART 21 — REPORT TEMPLATE
+
+Use this structure for each confirmed issue.
+
+## Title
+
+HTTP Request Desynchronization Between [Frontend] and [Backend]
+
+## Summary
+
+A request-framing inconsistency exists between [frontend component] and [backend component]. The frontend interprets the controlled request stream as [interpretation A], while the backend interprets it as [interpretation B].
+
+This causes [demonstrated consequence].
+
+## Affected target
+
+```text
+Hostname:
+Endpoint:
+Frontend:
+Backend:
+Protocol path:
+Environment:
+```
+
+## Classification
+
+```text
+PROTOCOL_VIOLATION:
+NORMALIZATION_DIFFERENCE:
+PARSER_DIFFERENTIAL:
+DOWNSTREAM_FRAMING_ANOMALY:
+BOUNDARY_DESYNC_CONFIRMED:
+IMPACT_CONFIRMED:
+```
+
+Select only the classifications supported by evidence.
+
+## Preconditions
+
+```text
+Required protocol:
+Required connection behavior:
+Required proxy path:
+Required backend behavior:
+Required authentication state:
+```
+
+## Reproduction
+
+Include:
+
+- Exact request bytes.
+- Exact line endings.
+- Exact Content-Length values.
+- Exact chunk sizes.
+- Exact protocol version.
+- Connection behavior.
+- Test environment.
+- Controlled follow-up request.
+
+## Frontend observation
+
+```text
+Parsed method:
+Parsed target:
+Parsed headers:
+Parsed body length:
+Request completion:
+Downstream representation:
+Connection state:
+```
+
+## Backend observation
+
+```text
+Received method:
+Received target:
+Received headers:
+Received body length:
+Request completion:
+Request sequence:
+Connection state:
+```
+
+## Boundary disagreement
+
+Explain exactly which bytes are assigned to different messages by the two components.
+
+Do not use vague language such as "the server gets confused."
+
+## Impact
+
+Explain the demonstrated consequence and its security relevance.
+
+## Reproduction consistency
+
+```text
+Attempts:
+Successful reproductions:
+Inconsistent results:
+Environmental conditions:
+```
+
+## Evidence
+
+Attach:
+
+- Raw request bytes.
+- Hex dump.
+- Frontend logs.
+- Backend logs.
+- Request IDs.
+- Response IDs.
+- Packet capture, where available.
+- Relevant timestamps.
+- Screenshots, if useful.
+
+## Remediation
+
+Recommend a concrete framing and connection-state fix.
+
+---
+
+# PART 22 — FINAL ASSESSMENT CHECKLIST
+
+## Authorization and scope
+
+- [ ] Written authorization confirmed.
+- [ ] Testing scope confirmed.
+- [ ] Rate limits understood.
+- [ ] Dedicated test environment preferred.
+- [ ] Shared-user traffic excluded.
+- [ ] Controlled canary endpoints available.
+
+## Architecture
+
+- [ ] Frontend identified.
+- [ ] Backend identified.
+- [ ] Proxy chain documented.
+- [ ] TLS termination points identified.
+- [ ] Protocol translation documented.
+- [ ] Connection pooling understood.
+- [ ] Retry behavior documented.
+- [ ] Request buffering behavior documented.
+
+## Baseline
+
+- [ ] Normal GET tested.
+- [ ] Normal POST tested.
+- [ ] Content-Length baseline tested.
+- [ ] Chunked baseline tested.
+- [ ] Sequential requests tested.
+- [ ] Persistent connections tested.
+- [ ] Response association verified.
+
+## HTTP/1.1
+
+- [ ] CL.TE examined.
+- [ ] TE.CL examined.
+- [ ] Duplicate Content-Length examined.
+- [ ] Conflicting Content-Length examined.
+- [ ] Transfer-Encoding ordering examined.
+- [ ] CL.0 behavior examined.
+- [ ] 0.CL behavior examined.
+- [ ] Chunk syntax examined.
+- [ ] Chunk extensions examined.
+- [ ] Header whitespace examined.
+- [ ] Request-target normalization examined.
+- [ ] Persistent connection handling examined.
+
+## HTTP/2
+
+- [ ] Normal request tested.
+- [ ] Content-Length consistency tested.
+- [ ] END_STREAM lifecycle tested.
+- [ ] HEADERS/CONTINUATION behavior tested.
+- [ ] Header normalization tested.
+- [ ] HTTP/2-to-HTTP/1.1 translation examined.
+- [ ] Stream reset behavior examined.
+- [ ] Flow control examined.
+- [ ] Trailer translation examined.
+- [ ] SETTINGS and GOAWAY behavior examined.
+- [ ] Multiplexed request isolation tested.
+
+## HTTP/3
+
+- [ ] Normal request tested.
+- [ ] Content-Length consistency tested.
+- [ ] Stream termination tested.
+- [ ] QPACK handling examined.
+- [ ] HTTP/3-to-HTTP/1.1 translation examined.
+- [ ] HTTP/3-to-HTTP/2 translation examined.
+- [ ] Stream cancellation examined.
+- [ ] Multiplexed request isolation tested.
+
+## Browser-facing behavior
+
+- [ ] Fetch baseline tested.
+- [ ] Request-body handling examined.
+- [ ] Redirect behavior tested separately.
+- [ ] Connection reuse verified server-side.
+- [ ] Cross-origin routing examined.
+- [ ] Coalescing not assumed.
+- [ ] Browser transport behavior independently verified.
+
+## CRLF and normalization
+
+- [ ] Encoded CRLF examined.
+- [ ] Double decoding examined.
+- [ ] Header serialization examined.
+- [ ] Path normalization examined.
+- [ ] Authority normalization examined.
+- [ ] Control-character handling examined.
+
+## Response-side behavior
+
+- [ ] Response baseline tested.
+- [ ] Content-Length consistency tested.
+- [ ] Chunked response completion tested.
+- [ ] Bodyless responses tested.
+- [ ] Informational responses tested.
+- [ ] Persistent response queue examined.
+- [ ] Response association verified.
+
+## Upgrade and tunnel behavior
+
+- [ ] WebSocket handshake tested.
+- [ ] Successful upgrade tested.
+- [ ] Rejected upgrade tested.
+- [ ] Post-upgrade framing tested.
+- [ ] CONNECT success tested.
+- [ ] CONNECT rejection tested.
+- [ ] Tunnel transition verified.
+- [ ] Post-transition data classified correctly.
+
+## Evidence and reporting
+
+- [ ] Exact bytes preserved.
+- [ ] Byte lengths calculated programmatically.
+- [ ] Frontend interpretation recorded.
+- [ ] Backend interpretation recorded.
+- [ ] Request boundaries compared.
+- [ ] Controlled canary used.
+- [ ] Response association verified.
+- [ ] False positives investigated.
+- [ ] Classification justified.
+- [ ] Reproduction consistency recorded.
+- [ ] Impact demonstrated safely.
+- [ ] Remediation provided.
+
+---
+
+# PART 23 — FINAL CLASSIFICATION DECISION TREE
+
+```text
+START
+  |
+  v
+Was the input accepted and processed?
+  |
+  +---- No
+  |      |
+  |      v
+  |   Was it invalid under the relevant protocol?
+  |      |
+  |      +---- Yes ---> PROTOCOL_VIOLATION
+  |      |
+  |      +---- Unknown -> INCONCLUSIVE
+  |
+  +---- Yes
+         |
+         v
+Do components interpret or normalize it differently?
+         |
+         +---- No ---> No observed differential
+         |
+         +---- Yes
+                |
+                v
+Does the difference affect message boundaries?
+                |
+                +---- No
+                |      |
+                |      +--> NORMALIZATION_DIFFERENCE
+                |      |
+                |      +--> PARSER_DIFFERENTIAL
+                |
+                +---- Unclear
+                |      |
+                |      +--> DOWNSTREAM_FRAMING_ANOMALY
+                |      |
+                |      +--> INCONCLUSIVE
+                |
+                +---- Yes
+                       |
+                       v
+Is the boundary disagreement directly evidenced?
+                       |
+                       +---- No ---> INCONCLUSIVE
+                       |
+                       +---- Yes
+                              |
+                              v
+Does it produce a demonstrated security consequence?
+                              |
+                              +---- No
+                              |      |
+                              |      +--> BOUNDARY_DESYNC_CONFIRMED
+                              |
+                              +---- Yes
+                                     |
+                                     +--> IMPACT_CONFIRMED
+```
+
+---
+
+# PART 24 — FINAL TECHNICAL RULES
+
+1. A malformed request is not automatically a desync.
+2. A parser differential is not automatically a boundary disagreement.
+3. A boundary disagreement is not automatically an exploitable security impact.
+4. A timing difference is not proof.
+5. An HTTP error is not proof.
+6. A connection reset is not proof.
+7. A backend waiting for bytes is not proof.
+8. A response containing extra bytes is not proof of response queue poisoning.
+9. A valid chunk extension is not malformed merely because one implementation handles it differently.
+10. A valid hexadecimal chunk size with leading zeroes is not automatically malformed.
+11. Conflicting Content-Length values must be treated as invalid framing, not as an ordinary test variation.
+12. HTTP/2 and HTTP/3 protocol errors must not be promoted to HTTP request smuggling without downstream boundary evidence.
+13. Browser JavaScript cannot guarantee TCP or backend connection reuse.
+14. `no-cors` does not prove request delivery, connection reuse, or response association.
+15. `redirect: "manual"` does not automatically follow a redirect.
+16. Same IP and certificate coverage do not guarantee HTTP/2 or HTTP/3 connection coalescing.
+17. CONNECT tunnel semantics begin only after a successful 2xx response.
+18. WebSocket framing begins only after a successful upgrade.
+19. A proxy may normalize or reconstruct a request, removing the original ambiguity.
+20. Compare actual downstream requests, not just client-side input.
+21. Calculate Content-Length and chunk sizes from exact bytes.
+22. Preserve raw requests and hex dumps.
+23. Use unique canary identifiers for every controlled request.
+24. Correlate requests across hops without assuming connection IDs are shared.
+25. Use isolated connections and test clients.
+26. Do not use unrelated users' traffic as a proof mechanism.
+27. Repeat tests to establish consistency, but do not claim that repetition proves zero false positives.
+28. Document inconclusive results honestly.
+29. Report routing, header, cache, or origin-isolation issues under their correct vulnerability class if no boundary disagreement is established.
+30. Never claim complete coverage of every published or future desync technique.
+
+---
+
+# FINAL CONCLUSION
+
+This methodology provides a structured assessment framework for HTTP request and response desynchronization across HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3, browser-facing infrastructure, protocol translators, persistent connections, response queues, and upgrade/tunnel transitions.
+
+Its central requirement is evidence:
+
+**The frontend and downstream component must be shown to disagree about message boundaries or message ownership before a finding is classified as confirmed desynchronization.**
+
+A strong assessment does not depend on a large collection of unusual payloads. It depends on:
+
+- Correct protocol understanding.
+- Exact byte construction.
+- Awareness of connection and stream state.
+- Knowledge of proxy transformations.
+- Frontend/backend correlation.
+- Controlled subsequent requests.
+- Correct response association.
+- Reproducible boundary evidence.
+- Accurate impact classification.
+
+**Version:** 4.2  
+**Status:** Comprehensive assessment specification  
+**Validation status:** Requires implementation-specific execution and verification  
+**Coverage claim:** Broad coverage of major known HTTP desynchronization surfaces; not a guarantee of detecting every implementation-specific or future vulnerability.
