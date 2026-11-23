@@ -1,0 +1,2565 @@
+================================================================================
+THE ULTIMATE WEB CACHE VULNERABILITY DETECTION FIELD MANUAL
+Version 4.0 — Complete Detection, Verification and Bug Bounty Methodology
+Updated: November 23, 2026
+================================================================================
+
+SCOPE
+Web Cache Poisoning, Web Cache Deception, Cache-Key Injection and closely
+related cache vulnerabilities.
+
+PURPOSE
+A comprehensive, practical methodology for discovering, validating,
+documenting and reporting web cache vulnerabilities during authorized
+security testing.
+
+
+================================================================================
+DOCUMENT SCOPE AND BOUNDARIES
+================================================================================
+
+IN SCOPE
+This manual focuses exclusively on vulnerabilities involving HTTP caching,
+cache-key construction, cache interpretation, response storage, response
+reuse and cache isolation.
+
+Covered areas:
+  1.  HTTP caching fundamentals.
+  2.  Cache architecture and cache-layer identification.
+  3.  Cacheability and freshness analysis.
+  4.  Cache-key composition, normalization, and serialization.
+  5.  Keyed and unkeyed request components.
+  6.  Web Cache Poisoning (WCP).
+  7.  Web Cache Deception (WCD).
+  8.  Cache-key injection and serialization collisions.
+  9.  Parser-discrepancy exploitation (delimiter and normalization).
+  10. Query-string and parameter-based cache discrepancies.
+  11. Header-based cache discrepancies.
+  12. Cookie and authentication-related caching.
+  13. URL parsing and path normalization discrepancies.
+  14. HTTP method and response-variation behavior.
+  15. CDN and reverse-proxy cache behavior.
+  16. API and GraphQL response caching.
+  17. CORS and cache variation problems.
+  18. Cross-user and cross-tenant cache isolation failures.
+  19. Cache-poisoning impact chains.
+  20. Burp Suite and custom detection workflows.
+  21. False-positive elimination.
+  22. Evidence collection, reporting and remediation.
+
+EXPLICITLY OUT OF SCOPE
+This is not a general web exploitation handbook. The following are excluded as
+independent vulnerability topics:
+
+  - HTTP request smuggling and request desynchronization
+    (CL.TE, TE.CL, HTTP/2 desync).
+  - ESI injection as a separate vulnerability class.
+  - Generic denial-of-service testing.
+  - Cache performance degradation and resource-exhaustion testing.
+  - General CDN infrastructure exploitation.
+  - Unrelated XSS, SSRF, authentication, authorization and injection
+    techniques.
+
+A related vulnerability may be mentioned only when it is necessary to explain
+the impact of a demonstrated cache vulnerability.
+
+
+================================================================================
+PART I — FOUNDATIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+1. UNDERSTANDING WEB CACHING
+--------------------------------------------------------------------------------
+
+A web cache stores a response so that a later request can reuse it instead of
+generating the response again from the origin server.
+
+    Client
+      |
+      v
+    CDN / Edge Cache
+      |
+      v
+    Reverse Proxy Cache
+      |
+      v
+    Application Cache
+      |
+      v
+    Origin Application
+      |
+      v
+    Database / Backend Services
+
+WHY CACHING EXISTS
+  - Reduce origin-server workload.
+  - Reduce response latency.
+  - Reduce repeated database and application processing.
+  - Improve scalability.
+  - Distribute content closer to users.
+  - Reduce bandwidth consumption.
+
+The security problem begins when a response generated for one request is
+reused for a request that should receive a different response.
+
+FUNDAMENTAL QUESTION:
+  Can the cache safely reuse this response for another request?
+
+If the answer is no, but the cache nevertheless reuses it, a cache
+vulnerability may exist.
+
+THE FUNDAMENTAL CACHE SECURITY MODEL
+Every cache implementation must decide:
+  1. Whether a request is eligible for caching.
+  2. Which stored response corresponds to the request.
+  3. Whether that response is still fresh.
+  4. Whether the response can be reused for the current request.
+  5. Whether the response needs revalidation.
+  6. Whether the response must be generated again.
+
+A vulnerable implementation may:
+  - Store a response containing attacker-controlled content.
+  - Reuse a response generated for a different user.
+  - Treat a dynamic endpoint as a static resource.
+  - Ignore a request component that changes the origin response.
+  - Normalize two requests into the same cache identity when they should be
+    different.
+  - Reuse a response across different authentication or tenant contexts.
+
+THE FIVE GOVERNING QUESTIONS
+
+  Q1. What is the cache key?
+      Which request components identify a stored response?
+
+  Q2. Which inputs affect the origin response but not the cache key?
+      These are potential unkeyed-input surfaces.
+
+  Q3. How are keyed components serialized and normalized?
+      Can distinct requests accidentally produce the same cache identity?
+
+  Q4. How do the cache and origin interpret the request?
+      Do they disagree about the URL, path, query string, method or
+      representation?
+
+  Q5. Can the resulting response be stored and retrieved by an unintended
+      request?
+      This is the decisive validation question.
+
+A strange response, reflected value or cache HIT is not enough. The actual
+response-reuse behavior must be demonstrated.
+
+--------------------------------------------------------------------------------
+2. HTTP CACHING FUNDAMENTALS
+--------------------------------------------------------------------------------
+
+PRIMARY REFERENCE
+  RFC 9111 — HTTP Caching
+  https://www.rfc-editor.org/rfc/rfc9111
+
+CACHEABLE RESPONSE VERSUS CACHED RESPONSE
+
+  Cacheable response: permitted to be stored under the applicable caching
+  rules and implementation configuration.
+
+  Cached response: actually stored and available for possible reuse.
+
+  A response may be cacheable without ever being stored.
+  A response may also be stored by a custom CDN or proxy configuration even
+  when the origin's intended caching policy would discourage it.
+  Inspect both HTTP directives and observed behavior.
+
+FRESHNESS
+A cached response is fresh when it can be reused without mandatory
+revalidation under the applicable caching rules.
+
+  Directive              Security-testing significance
+  ---------------------  ------------------------------------------------
+  public                 Explicitly permits shared caching in circumstances
+                         where it might otherwise be restricted
+  private                Restricts storage by shared caches under standard
+                         HTTP caching rules
+  no-store               Instructs caches not to store the response
+  no-cache               Allows storage but requires validation before reuse
+  max-age                Defines freshness lifetime for caches
+  s-maxage               Defines freshness lifetime for shared caches and
+                         takes precedence over max-age for them
+  must-revalidate        Restricts reuse of stale responses without
+                         successful validation
+  proxy-revalidate       Applies a related revalidation requirement to
+                         shared caches
+  immutable              Indicates that a fresh response will not change
+                         during its freshness lifetime
+
+CRITICAL DISTINCTION:
+  no-cache is NOT no-store.
+
+  Cache-Control: no-cache  — May still be stored. Must be validated before
+                             reuse.
+  Cache-Control: no-store  — Instructed not to be stored.
+
+Do not conclude that a response cannot be vulnerable merely because it
+contains no-cache. Conversely, do not assume that a custom CDN configuration
+follows the intended policy without testing.
+
+FRESHNESS-RELATED HEADERS
+
+  Date              The date and time associated with message generation.
+  Age               An estimate of the time since the response was generated
+                    or successfully validated by the origin.
+  Expires           An absolute expiration time.
+  Last-Modified     A validator-related timestamp.
+  ETag              An entity tag used for representation validation.
+
+Age is useful evidence, but it is not a universal proof of cache storage.
+A cache can omit Age. A proxy can modify or remove headers. Multiple cache
+layers can also make the observed value difficult to interpret.
+
+CACHE VALIDATION
+Caches may validate stored responses using conditional requests.
+
+  If-None-Match: "abc123"
+  If-Modified-Since: Mon, 23 Nov 2026 09:00:00 GMT
+
+Possible response:
+
+  HTTP/1.1 304 Not Modified
+  ETag: "abc123"
+
+During an investigation, distinguish:
+  - A new response from the origin.
+  - A cached response reused without validation.
+  - A cached response revalidated by the origin.
+  - A response generated by another intermediary.
+
+Do not treat all repeated responses as proof of a cache HIT.
+
+SHARED CACHES VERSUS PRIVATE CACHES
+  Private cache: associated with an individual user agent, such as a browser.
+  Shared cache: can serve multiple users, such as a CDN or shared reverse
+                proxy.
+
+This distinction is essential for impact assessment. If User A causes a
+sensitive response to be stored in a shared cache and User B can retrieve it,
+the issue may expose User A's data. A response stored only in User A's browser
+cache does not automatically establish a cross-user vulnerability.
+
+THE VARY HEADER
+The Vary response header tells caches which request headers influence the
+selected representation.
+
+  Vary: Accept-Language
+  Vary: Accept-Encoding, Accept-Language
+
+Security testing should investigate:
+  - Whether the origin varies the response based on a header.
+  - Whether the response declares the correct Vary dimensions.
+  - Whether the cache honors those dimensions.
+  - Whether custom cache rules override or ignore them.
+  - Whether an attacker-controlled header changes the response without an
+    appropriate cache-key distinction.
+
+Do not assume that the absence of Vary automatically proves a vulnerability.
+The origin may not actually vary its response, or the cache may use another
+configured key dimension.
+
+--------------------------------------------------------------------------------
+3. CACHE ARCHITECTURE AND IDENTIFICATION
+--------------------------------------------------------------------------------
+
+COMMON CACHE LAYERS
+
+  Layer                 Typical role                Testing significance
+  --------------------  ---------------------------  -------------------
+  Browser cache         Stores resources locally     Client-side reuse
+  CDN / edge cache      Stores responses near users  Cross-user exposure
+  Reverse proxy cache   Caches origin responses      Custom cache keys
+  Application cache     Stores application responses Can hide behind CDN
+  API gateway cache     Caches API responses         Auth/tenant handling
+  Framework cache       Caches routes or fragments   User-specific data
+  Object cache          Stores application data      Indirect reuse
+
+The same endpoint may be cached by more than one layer. A response may be a
+CDN MISS but an application-cache HIT. This is why cache detection must not
+rely on one header.
+
+COMMON CACHE-IDENTIFICATION HEADERS
+
+  Age
+  Cache-Control
+  Expires
+  ETag
+  Last-Modified
+  Vary
+  Via
+  Warning
+  X-Cache
+  X-Cache-Hits
+  X-Cache-Status
+  CF-Cache-Status
+  Server-Timing
+  X-Served-By
+  X-Proxy-Cache
+  X-Drupal-Cache
+  X-Varnish
+
+These headers are clues, not universal proof.
+
+  Cloudflare:   CF-Cache-Status: HIT
+  Varnish:      X-Varnish: 12345 67890
+  Nginx:        X-Cache-Status: HIT
+  Generic:      Via: 1.1 proxy.example
+
+Header names and values vary by deployment. Their presence or absence does not
+independently prove whether the application is vulnerable.
+
+CACHE STATUS INDICATORS
+
+  Status         Typical interpretation
+  -------------  --------------------------------------------------------
+  HIT            A stored response was reused
+  MISS           The cache did not find a usable stored response
+  BYPASS         Cache lookup or storage was bypassed
+  EXPIRED        A stored response was no longer fresh
+  STALE          A stale response was used under applicable behavior
+  REVALIDATED    A stored response was successfully revalidated
+  DYNAMIC        Response not treated as a normal cached object by that
+                 implementation
+
+These labels are implementation-specific. Always interpret them in the
+context of the actual cache provider and response sequence.
+
+FINGERPRINTING CACHE INFRASTRUCTURE
+Use multiple observations:
+  1.  Response headers.
+  2.  DNS and hostname information.
+  3.  Server headers.
+  4.  CDN-specific response metadata.
+  5.  Differences between repeated requests.
+  6.  Cache behavior across different paths.
+  7.  Cache behavior with and without query strings.
+  8.  Cache behavior for authenticated and unauthenticated requests.
+  9.  Static resource behavior.
+  10. Response timing as supporting evidence only.
+
+Do not infer the exact cache-key configuration from the provider name.
+Knowing that a target uses Cloudflare does not tell you whether the
+application uses a default cache key, a custom cache key, Cache Rules,
+Workers, or another configuration. The same provider can be deployed with
+substantially different caching behavior.
+
+--------------------------------------------------------------------------------
+4. THE CACHE-KEY MODEL
+--------------------------------------------------------------------------------
+
+The cache key is the central concept in Web Cache Poisoning and cache-key
+injection. A cache uses a key to identify which stored response corresponds
+to a request.
+
+A simplified conceptual key:
+
+  CACHE_KEY = scheme + hostname + path + query_string + selected_headers
+
+A simplified Nginx configuration may use:
+
+  proxy_cache_key "$scheme$proxy_host$request_uri";
+
+A custom implementation may use an entirely different construction.
+
+POTENTIAL CACHE-KEY DIMENSIONS
+
+  Request-target dimensions:
+    URL scheme.
+    Hostname.
+    Port.
+    Path.
+    Query string.
+    Query parameter ordering.
+    Query parameter values.
+    Duplicate parameters.
+    Percent-encoding.
+    Path normalization.
+    Trailing slash.
+    Case normalization.
+
+  Header dimensions:
+    Accept.
+    Accept-Language.
+    Accept-Encoding.
+    Origin.
+    User-Agent.
+    Forwarding headers.
+    Custom application headers.
+
+  Authentication dimensions:
+    Session cookies.
+    Authorization headers.
+    API tokens.
+    Tenant identifiers.
+    User-specific headers.
+
+  Method and body dimensions:
+    HTTP method.
+    Request body.
+    Method-override headers.
+    Content negotiation.
+    Application-specific body parsing.
+
+Never assume that all these components are included or excluded. Their
+behavior must be measured.
+
+KEYED VERSUS UNKEYED INPUTS
+
+  A. Unkeyed input
+     An input changes the origin response but does not create a distinct
+     cache identity.
+
+       Request A: GET /home with X-Forwarded-Host: attacker-controlled.example
+       Request B: GET /home
+
+     If the origin generates different responses but the cache treats both
+     requests as the same key, a poisoning condition may exist.
+
+  B. Keyed-fragment manipulation (Cache-Key Injection)
+     An input participates in the cache key, but its representation or
+     serialization may be ambiguous.
+
+       KEY = PATH + "_" + HEADER
+
+     If the cache concatenates components without safely separating or
+     encoding them, two different component combinations may produce the
+     same serialized key.
+
+  The important distinction:
+    - Unkeyed testing asks what the cache ignores.
+    - Cache-key injection testing asks whether the cache incorrectly combines
+      what it includes.
+
+  Both surfaces must be investigated.
+
+THE CACHE-KEY SECURITY INVARIANT
+  If two requests can produce security-relevantly different responses, they
+  must not accidentally share a cache identity unless the response is safe to
+  reuse between them.
+
+A cache-key investigation should establish:
+  1. Which components influence the origin response?
+  2. Which components influence the cache key?
+  3. Which components are normalized?
+  4. Which components are omitted?
+  5. Which distinct requests are treated as equivalent?
+  6. Whether that equivalence is safe.
+
+--------------------------------------------------------------------------------
+5. THE CORE DETECTION WORKFLOW
+--------------------------------------------------------------------------------
+
+    RECONNAISSANCE
+          |
+          v
+    IDENTIFY CACHE LAYERS
+          |
+          v
+    ESTABLISH BASELINE
+          |
+          v
+    IDENTIFY CACHEABLE ENDPOINTS
+          |
+          v
+    MAP CACHE-KEY DIMENSIONS
+          |
+          v
+    DISCOVER ORIGIN-AFFECTING INPUTS
+          |
+          v
+    IDENTIFY CACHE / ORIGIN DISCREPANCIES
+          |
+          v
+    TEST WCP / WCD / KEY INJECTION
+          |
+          v
+    VERIFY STORAGE AND CLEAN RETRIEVAL
+          |
+          v
+    VERIFY CROSS-SESSION IMPACT
+          |
+          v
+    ELIMINATE FALSE POSITIVES
+          |
+          v
+    DOCUMENT AND REPORT
+
+The most important discipline is to keep the stages separate.
+
+  - Do not jump from a reflected header to a poisoning claim.
+  - Do not jump from a static extension to a deception claim.
+  - Do not jump from a cache HIT to an isolation-failure claim.
+
+Each stage needs evidence.
+
+--------------------------------------------------------------------------------
+6. RECONNAISSANCE AND ENDPOINT DISCOVERY
+--------------------------------------------------------------------------------
+
+IDENTIFY APPLICATION AREAS
+
+  Endpoint category                 Why it matters
+  --------------------------------  ----------------------------------
+  Homepage                          Frequently cached and shared
+  Public landing pages              Potential shared-cache poisoning
+  Search endpoints                  Query-string and representation
+                                    variation
+  Product or content pages          URL and parameter handling
+  Profile pages                     Potential user-specific content
+  Account pages                     Sensitive authenticated responses
+  Dashboard pages                   Session-dependent data
+  API endpoints                     Authentication and tenant isolation
+  Image and document endpoints      Static-resource cache rules
+  JavaScript and CSS resources      Cacheable content manipulation
+  Redirect endpoints                Cached Location behavior
+  Error endpoints                   Error-response caching behavior
+  Localization endpoints            Language variation
+  Mobile or device-specific routes  User-Agent and representation
+
+IDENTIFY PUBLIC AND AUTHENTICATED SURFACES
+
+  Public endpoints:
+    No authentication required. Shared content. Search and listing pages.
+    Static resources. Public APIs.
+
+  Authenticated endpoints:
+    Profile and account routes. User dashboards. Order or transaction
+    history. Personal settings. Authenticated API routes. Tenant-specific
+    endpoints.
+
+Do not assume that authenticated endpoints are never cached. The goal is to
+verify their actual behavior.
+
+PRIORITIZE ENDPOINTS
+
+  High priority:
+    - Dynamic responses containing user-specific data.
+    - Endpoints with long cache freshness.
+    - Endpoints showing repeated cache HIT behavior.
+    - Responses influenced by request headers.
+    - Endpoints with reflected host or URL values.
+    - APIs that return different content for different sessions.
+    - Routes with unusual path or query normalization.
+
+  Medium priority:
+    - Public HTML pages.
+    - Search pages.
+    - Redirects.
+    - Localization and content-negotiation endpoints.
+    - Static resources with dynamic response behavior.
+
+  Lower priority:
+    - Immutable public static files.
+    - Responses that do not vary by user or request.
+    - Endpoints that demonstrably bypass shared caching.
+
+Prioritization is a testing efficiency decision, not proof that an endpoint
+is or is not vulnerable.
+
+--------------------------------------------------------------------------------
+7. ESTABLISHING A RELIABLE BASELINE
+--------------------------------------------------------------------------------
+
+Never begin cache manipulation before establishing normal behavior.
+
+For every selected endpoint, record:
+  - Exact request method.
+  - Exact URL.
+  - Request headers.
+  - Authentication state.
+  - Request cookies.
+  - Response status.
+  - Response headers.
+  - Response body.
+  - Cache status indicators.
+  - Age, if present.
+  - Cache-Control.
+  - Vary.
+  - Response timing.
+  - Whether the result changes across repeated requests.
+
+BASELINE REQUEST EXAMPLE
+
+  GET / HTTP/1.1
+  Host: target.example
+  User-Agent: CacheResearch/1.0
+  Accept: text/html
+  Connection: close
+
+REPEAT THE IDENTICAL REQUEST
+
+  Request 1:  CF-Cache-Status: MISS
+  Request 2:  CF-Cache-Status: HIT
+              Age: 12
+
+This suggests that the response may have been stored and reused.
+However, the exact meaning depends on the implementation.
+
+Also compare:
+  - Response body.
+  - Status code.
+  - Content-Type.
+  - Cache directives.
+  - ETag.
+  - Date.
+  - Age.
+  - Any request identifiers.
+
+BASELINE COMPARISON TABLE
+
+  Property         Request 1   Request 2   Request 3
+  ---------------- ----------- ----------- -----------
+  Status           Record      Record      Record
+  Cache status     Record      Record      Record
+  Age              Record      Record      Record
+  Body hash        Record      Record      Record
+  Content-Type     Record      Record      Record
+  Cache-Control    Record      Record      Record
+  Vary             Record      Record      Record
+  Authentication   Record      Record      Record
+
+The objective is to understand ordinary cache behavior before introducing any
+test variable.
+
+CACHE-BUSTING PRECAUTIONS
+A cache-busting parameter is not automatically effective.
+
+  GET /?cb=unique123
+
+The cache may:
+  - Include the parameter in its key.
+  - Ignore the parameter.
+  - Strip the parameter.
+  - Normalize it.
+  - Apply a custom rule.
+  - Treat it differently from the origin.
+
+Before using a cache-busting parameter, establish whether it actually produces
+a distinct cache identity. Do not assume that a unique query parameter
+guarantees an independent cache entry.
+
+--------------------------------------------------------------------------------
+8. CONTROLLED EXPERIMENT DESIGN
+--------------------------------------------------------------------------------
+
+ONE-VARIABLE-AT-A-TIME PRINCIPLE
+
+  Baseline request
+        |
+        v
+  Change one component
+        |
+        v
+  Compare origin response
+        |
+        v
+  Compare cache behavior
+        |
+        v
+  Record the result
+
+Avoid modifying multiple headers, parameters and path components
+simultaneously. If the response changes, you must know which modification
+caused the change.
+
+USE UNIQUE HARMLESS MARKERS
+Use a marker that is easy to recognize and cannot be confused with normal
+content.
+
+  CACHE_TEST_7f3a91
+
+For each experiment:
+  1. Generate a new marker.
+  2. Place it in one candidate input.
+  3. Send the modified request.
+  4. Determine whether the response changes.
+  5. Determine whether the cache identity changes.
+  6. Send a clean request.
+  7. Determine whether the marker remains in the returned response.
+
+Use harmless text during initial discovery. Do not begin with executable
+payloads.
+
+SEPARATE THE FOUR OBSERVATIONS
+
+  Observation            Question
+  ---------------------  ---------------------------------------------
+  Origin influence       Does the input change the generated response?
+  Cache-key influence    Does the input create a distinct cache identity?
+  Storage behavior       Is the modified response actually stored?
+  Retrieval behavior     Can a clean request retrieve the modified
+                         response?
+
+CONTROLLED TEST MATRIX
+
+  Test ID   Endpoint    Input         Origin?  Key?    Stored?  Retrieval?
+  --------  ----------  ------------  -------  ------  -------  ----------
+  T-001     /           Header A      Yes/No   Yes/No  Yes/No   Yes/No
+  T-002     /search     Parameter A   Yes/No   Yes/No  Yes/No   Yes/No
+  T-003     /profile    Path suffix   Yes/No   Yes/No  Yes/No   Yes/No
+  T-004     /api/me     Cookie var.   Yes/No   Yes/No  Yes/No   Yes/No
+
+A negative result is useful. It prevents repeating the same experiment and
+helps identify the actual cache behavior.
+
+--------------------------------------------------------------------------------
+9. EVIDENCE STANDARDS
+--------------------------------------------------------------------------------
+
+MINIMUM EVIDENCE FOR A WCP CANDIDATE
+  1. Baseline request and response.
+  2. Modified request and response.
+  3. Evidence that the input influences the origin response.
+  4. Evidence that the input does not create a distinct cache identity.
+  5. Evidence that the modified response is stored or otherwise reused.
+  6. Clean request without the modifying input.
+  7. Response showing the modified content.
+  8. Independent-session evidence when cross-user impact is claimed.
+
+MINIMUM EVIDENCE FOR A WCD CANDIDATE
+  1. Authenticated baseline response.
+  2. Sensitive response content, limited to data belonging to your own test
+     account.
+  3. Deceptive URL request.
+  4. Evidence that the origin resolves it to the dynamic endpoint.
+  5. Evidence that the cache treats it as cacheable.
+  6. Clean unauthenticated request.
+  7. Evidence that the sensitive response is returned without the original
+     authentication context.
+
+MINIMUM EVIDENCE FOR CACHE-KEY INJECTION
+  1. Two distinct raw requests.
+  2. Evidence that the cache treats them as the same identity.
+  3. Evidence that the origin processes them differently.
+  4. Evidence of the resulting response collision.
+  5. A clean retrieval request demonstrating the security consequence.
+
+WHAT DOES NOT ESTABLISH A VULNERABILITY
+None of the following is sufficient by itself:
+  - X-Cache: HIT.
+  - Age greater than zero.
+  - A response containing attacker-controlled input.
+  - A public cache directive.
+  - A static file extension.
+  - An unusual URL normalization result.
+  - Two similar response bodies.
+  - A scanner finding.
+  - A response that differs between two requests.
+  - A theoretical cache-key collision.
+
+A vulnerability requires a demonstrated security consequence from the cache
+behavior.
+
+--------------------------------------------------------------------------------
+10. SAFE TESTING PRINCIPLES
+--------------------------------------------------------------------------------
+
+  1.  Test only systems covered by explicit authorization.
+  2.  Use your own accounts and sessions.
+  3.  Use harmless unique markers during discovery.
+  4.  Prefer endpoints and environments where cache entries can be isolated.
+  5.  Establish whether cache-busting actually works before relying on it.
+  6.  Avoid storing executable content in shared production cache entries.
+  7.  Do not retrieve or inspect another user's private data.
+  8.  Use a second controlled account only when the program permits it.
+  9.  Stop once sufficient impact has been established.
+  10. Avoid repeated cache refreshes or unnecessary load.
+  11. Preserve the original request and response evidence.
+  12. Do not attempt to invalidate shared cache entries unless authorized.
+  13. If safe cross-session verification is impossible, explain the
+      limitation rather than overstating impact.
+
+PART I COMPLETION CHECKLIST
+
+  Foundations
+  - [ ] Understand private and shared caches.
+  - [ ] Understand cache freshness and validation.
+  - [ ] Understand Cache-Control.
+  - [ ] Understand Vary.
+  - [ ] Understand Age, ETag and Last-Modified.
+  - [ ] Identify possible cache layers.
+  - [ ] Understand cache status indicators.
+
+  Cache-key model
+  - [ ] Understand keyed inputs.
+  - [ ] Understand unkeyed inputs.
+  - [ ] Identify potential key dimensions.
+  - [ ] Understand normalization.
+  - [ ] Understand serialization.
+  - [ ] Understand response-reuse conditions.
+
+  Initial testing
+  - [ ] Enumerate public endpoints.
+  - [ ] Enumerate authenticated endpoints.
+  - [ ] Identify API routes.
+  - [ ] Identify static-resource paths.
+  - [ ] Record baseline responses.
+  - [ ] Repeat identical requests.
+  - [ ] Compare cache status and response bodies.
+  - [ ] Verify cache-busting behavior.
+  - [ ] Build a controlled testing matrix.
+
+  Evidence and safety
+  - [ ] Use unique harmless markers.
+  - [ ] Change one variable at a time.
+  - [ ] Separate origin influence from cache influence.
+  - [ ] Verify actual storage.
+  - [ ] Verify clean retrieval.
+  - [ ] Use controlled sessions.
+  - [ ] Avoid accessing other users' data.
+  - [ ] Preserve reproducible evidence.
+
+
+================================================================================
+PART II — ADVANCED CACHE-KEY ANALYSIS AND CACHE-KEY INJECTION
+================================================================================
+
+--------------------------------------------------------------------------------
+11. CACHE-KEY RECONSTRUCTION
+--------------------------------------------------------------------------------
+
+Reconstruction is the disciplined process of determining, from observed
+behavior, which request components participate in the cache key and how.
+
+Do not infer the key from the provider name, framework, or header names.
+Reconstruct it.
+
+RECONSTRUCTION LOOP
+
+  Baseline request
+        |
+        v
+  Vary ONE candidate component
+        |
+        v
+  Observe cache behavior
+        |
+        v
+  Classify the component
+        |
+        v
+  Record in the key map
+        |
+        v
+  Repeat for the next component
+
+COMPONENT CLASSIFICATION
+
+  Label         Meaning
+  ------------  -----------------------------------------------------
+  KEYED         Changing the component produces a distinct identity
+  UNKEYED       Changing the component does not affect cache identity
+  NORMALIZED    Some variants collapse; others do not
+  IGNORED       Cache strips or discards the component entirely
+
+OBSERVATION SIGNALS
+Use several signals together. No single signal is proof.
+
+  Signal                                        Interpretation
+  --------------------------------------------  --------------------
+  MISS followed by HIT on the new value         New value created a
+                                                distinct entry
+  Fresh Age: 0 on the new value                 New value created a
+                                                distinct entry
+  HIT on a request that differs from the        Two requests share an
+  cached one                                    identity
+  Rising Age with no MISS                       Two requests share an
+                                                identity
+  Original body served despite the change       Two requests share an
+                                                identity
+  Different body returned                       Origin responded
+                                                differently (not proof
+                                                of key change)
+
+THE KEY MAP
+Record every result. The key map is the single most valuable artifact of the
+engagement.
+
+  Dimension              Behavior                       Evidence    Notes
+  ---------------------  -----------------------------  ----------  -----
+  Scheme                 Keyed / Normalized / Ignored
+  Host                   Keyed / Normalized / Ignored
+  Port                   Keyed / Normalized / Ignored
+  Path                   Keyed / Normalized / Ignored
+  Trailing slash         Keyed / Normalized / Ignored
+  Query string (full)    Keyed / Normalized / Ignored
+  Query param order      Keyed / Normalized / Ignored
+  Duplicate parameters   First / Last / All / Combined
+  Accept                 Keyed / Unkeyed
+  Accept-Language        Keyed / Unkeyed
+  Accept-Encoding        Keyed / Unkeyed
+  User-Agent             Keyed / Unkeyed
+  Origin                 Keyed / Unkeyed
+  Cookie                 Bypass / Keyed / Ignored
+  Authorization          Bypass / Keyed / Ignored
+  X-Forwarded-Host       Keyed / Unkeyed
+  X-Original-URL         Keyed / Unkeyed
+  Method                 Keyed / Ignored
+  Body                   Keyed / Ignored
+
+RECONSTRUCTION CAUTIONS
+  - Origin-side caching can mimic CDN behavior.
+  - Multiple cache layers can produce confusing HIT/MISS sequences.
+  - A body difference does not always mean the key changed.
+  - A HIT does not always mean the response was stored under the expected key.
+  - A cache-buster in a filtered parameter does not isolate the test.
+  - Verify cache-buster effectiveness before relying on it.
+
+--------------------------------------------------------------------------------
+12. KEYED AND UNKEYED DIMENSION MAPPING
+--------------------------------------------------------------------------------
+
+HEADER EXPERIMENTS
+For each candidate header H:
+
+  R1: GET /endpoint            (no H)
+  R2: GET /endpoint  H: marker (with H)
+  R3: GET /endpoint            (no H, clean)
+
+Record four independent observations:
+
+  Observation      Question
+  ---------------  -------------------------------------------------
+  Origin influence Does R2 body differ from R1 body?
+  Key influence    Does R2 create a distinct cache entry?
+  Storage          Is R2's body stored?
+  Retrieval        Does R3 return R2's body?
+
+CANDIDATE HEADER CLASSES
+
+  Class              Headers
+  -----------------  -----------------------------------------------
+  Host / URL         X-Forwarded-Host, X-Forwarded-Proto,
+                     X-Forwarded-Port, X-Forwarded-Scheme,
+                     X-Forwarded-Server, X-Original-Host,
+                     X-Original-URL, X-Rewrite-URL, X-Host,
+                     X-HTTP-Host-Override, Forwarded
+  Representation     Accept, Accept-Language, Accept-Encoding,
+                     User-Agent, Origin, Referer
+  Method             X-HTTP-Method-Override, X-Method-Override,
+                     X-HTTP-Method
+  Routing/rewrite    X-Original-URL, X-Rewrite-URL, X-Forwarded-Prefix,
+                     X-Forwarded-Path
+  Application/proxy  X-Requested-With, X-Ajax, X-Debug,
+                     X-Forwarded-For, X-Real-IP
+
+QUERY-STRING EXPERIMENTS
+
+  A. Full query string keyed?
+     /page?a=1  vs  /page?a=2
+     Distinct entries → query string is keyed.
+
+  B. Query string entirely ignored?
+     /page?a=1  vs  /page?b=2
+     Same entry → query string is ignored.
+
+  C. Individual parameter filtering?
+     /page?keep=1&drop=2  vs  /page?keep=1
+     Same entry → drop is filtered from the key.
+
+  D. Parameter ordering
+     /page?a=1&b=2  vs  /page?b=2&a=1
+     Same entry → order is normalized.
+
+  E. Duplicate parameters
+     /page?p=1&p=2
+     Observe first, last, all, or combined.
+
+  F. Empty and encoded values
+     /page?p=
+     /page?p=%00
+     /page?p=%2e%2e
+
+COOKIE AND AUTHENTICATION DIMENSIONS
+Cookies and authorization headers are frequently a bypass switch rather
+than a keyed dimension.
+
+  Test A: Authenticated request with session cookie.
+  Test B: Unauthenticated request without cookie.
+  Test C: Authenticated request plus cache-busting parameter.
+
+Determine:
+  - Does the presence of a cookie force BYPASS or DYNAMIC?
+  - Are anonymous responses cached while authenticated responses are not?
+  - Are authenticated responses cached under a key shared with anonymous
+    requests?
+  - Is the Authorization header treated the same way as cookies?
+
+A response that is cached for anonymous users but served to authenticated
+users is a common isolation-failure root cause.
+
+METHOD DIMENSIONS
+
+  Question                                 Test
+  ---------------------------------------  -------------------------
+  Is GET keyed separately from HEAD?       Compare HEAD /x against
+                                           cached GET /x
+  Does POST share a key with GET?          POST /x vs GET /x
+  Does method-override change the key?     GET with
+                                           X-HTTP-Method-Override:
+                                           POST vs plain GET
+  Is the body keyed?                       Two POST requests with
+                                           different bodies
+
+--------------------------------------------------------------------------------
+13. NORMALIZATION TESTING
+--------------------------------------------------------------------------------
+
+For each keyed dimension, map normalization. Send variants and record which
+collapse to the same entry.
+
+PATH NORMALIZATION
+Test each variant against baseline /a/b:
+
+  /a/b
+  /a//b
+  /a/./b
+  /a/x/../b
+  /a/%2e/b
+  /a/%2e%2e/b
+  /a%2fb
+  /a/b/
+  /A/B
+  /a/b;param
+  /a/b%00
+  /a/b%23frag
+  /a/b?
+
+Does the cache treat it as the same entry as /a/b? Does the origin?
+
+QUERY NORMALIZATION
+
+  ?a=1&b=2
+  ?b=2&a=1
+  ?a=1&b=2&a=3
+  ?a=%31
+  ?a=1&
+  ?a=1&&b=2
+  ?a=1;b=2
+  ?=1
+  ?a
+
+PORT NORMALIZATION
+
+  Host: example.com
+  Host: example.com:80
+  Host: example.com:443
+  Host: example.com:8080
+  Host: example.com:9999
+
+If the cache omits the port from its key but the origin uses it to build
+URLs, a keyed fragment is effectively unkeyed for URL generation.
+
+SCHEME NORMALIZATION
+
+  http://example.com/path
+  https://example.com/path
+  HTTP://example.com/path
+
+If the cache normalizes scheme but the origin uses it for HSTS, redirects, or
+absolute URL generation, a discrepancy may exist.
+
+CASE NORMALIZATION
+Test casing of host, path, query names, and header names independently.
+
+ENCODING AND DELIMITER MATRIX
+For each keyed component, test these characters:
+
+  Character   Encoded   Role
+  ----------  --------  -------------------------------------------
+  Semicolon   ;  %3b    Path parameter separator
+  Slash       /  %2f    Path separator
+  Dot         .  %2e    Dot-segment resolution
+  Question    ?  %3f    Query separator
+  Hash        #  %23    Fragment
+  Null        %00       Historical truncation
+  Ampersand   &  %26    Parameter separator
+  Equals      =  %3d    Name/value separator
+  Space       " " %20   Normalization
+  Backslash   \  %5c    Windows path separator
+
+The gap between cache and origin interpretation for any of these is the
+exploit surface.
+
+--------------------------------------------------------------------------------
+14. SERIALIZATION AMBIGUITY AND COLLISIONS
+--------------------------------------------------------------------------------
+
+Cache keys are frequently built by concatenation:
+
+  KEY = componentA + delimiter + componentB + ...
+
+If the delimiter is not escaped in either component, two different raw
+requests can produce the same serialized key.
+
+CONCEPTUAL COLLISION
+
+  KEY = path + "_" + language
+
+  Request 1: path=/home_en,  language=en    -> "/home_en_en"
+  Request 2: path=/home,     language=en_en -> "/home_en_en"
+
+If the origin treats these as different resources but the cache treats them
+as one, a collision exists.
+
+THE CANONICALIZATION COLLISION PATTERN
+A widely observed real-world pattern: the cache joins key/value pairs with
+"&" without escaping "&" inside values.
+
+  { q: "budget", rows: 10 }   ->  q=budget&rows=10
+  { q: "budget&rows=10" }     ->  q=budget&rows=10
+
+Two logically distinct parameter sets serialize to the same cache key.
+The origin returns one response for both.
+
+This pattern has been documented across frameworks and applications,
+including CVE-2025-73946 (Cache Key Canonicalization Collision).
+
+DETECTING COLLISIONS
+
+  Step 1: Hypothesize the delimiter.
+  Step 2: Craft request A whose component contains the delimiter.
+  Step 3: Craft request B whose component boundary aligns to the same
+          serialized string.
+  Step 4: Send both. Observe whether the cache serves the same response.
+  Step 5: If yes, and the origin would return different content, a
+          collision is confirmed.
+
+COLLISION VERIFICATION
+
+  Requirement                 Evidence
+  --------------------------  -------------------------------------------
+  Two distinct raw requests   Full request captures
+  Same cache identity         HIT on second request, rising Age, or
+                              identical stored body
+  Different origin processing Origin responses differ when cache bypassed
+  Response reuse              Clean request retrieves unintended response
+  Security consequence        ACL bypass, sensitive data, or other
+                              demonstrated impact
+
+Do not report a hypothesized collision without clean-retrieval proof.
+
+--------------------------------------------------------------------------------
+15. CACHE-KEY INJECTION PATTERNS AND IMPACT
+--------------------------------------------------------------------------------
+
+KNOWN PATTERNS
+
+  Pattern                         Description
+  ------------------------------  --------------------------------------
+  Underscore injection (Nginx)    Key concatenates $request_uri and
+                                  headers without escaping; underscore
+                                  shifts the boundary
+  Separator injection             "|", ":", ";" used as delimiters;
+                                  attacker injects separator
+  Query normalization             Cache sorts/filters parameters before
+                                  keying; origin does not
+  Port normalization              Cache omits port; origin uses port for
+                                  URL generation
+  Canonicalization collision      Key/value pairs joined with "&" without
+                                  escaping values
+
+YesWeHack's 2026 research ("Cache key injection: Smuggling poison through
+the door") demonstrates that ambiguous cache key concatenation can bypass
+access-control rules, enable WCD without user interaction, cause CPDoS, and
+turn HTTP scheme confusion into stored XSS. It also shows how to bypass an
+edge cache (e.g., Cloudflare) to reach and poison an Nginx origin cache.
+
+WHAT CACHE-KEY INJECTION ENABLES
+
+  Outcome                         Description
+  ------------------------------  --------------------------------------
+  Access-control bypass           Collide public key with privileged
+                                  route
+  WCD without user interaction    Store private content under public key
+  CPDoS                           Collide healthy key with error-page key
+  Stored XSS via scheme           Inject "javascript:" into key used for
+  confusion                       "https:" resources
+
+Each requires full-chain proof.
+
+PARAMETER CLOAKING VERSUS CACHE-KEY INJECTION
+
+  Technique              Core problem
+  ---------------------  ----------------------------------------------
+  Parameter cloaking     Cache and origin parse parameters differently
+  Cache-key injection    Key serialization is ambiguous or manipulable
+  Unkeyed parameter      Origin processes parameter omitted from key
+  Key normalization      Cache transforms keyed input differently from
+                         origin
+
+PARAMETER CLOAKING TEST PATTERNS
+
+  - Different separator interpretation:
+      ?a=1;b=2
+      ?a=1%3bb=2
+  - Duplicate parameter handling mismatch:
+      ?role=user&role=admin
+  - Encoded delimiter:
+      ?a=1%26b=2
+      ?a=1%3db=2
+  - Case sensitivity:
+      ?Role=admin vs ?role=user
+  - Empty-value handling:
+      ?debug vs ?debug= vs ?debug=0
+
+For each: does the cache key differ while the origin response differs?
+
+SYSTEMATIC COLLISION VERIFICATION MATRIX
+
+  Test ID  Component     Delimiter  Req A   Req B   Same?  Diff?  Impact?
+  -------  ------------  ---------  ------  ------  -----  -----  -------
+  C-001    path + lang   _          Rec.    Rec.    Y/N    Y/N    Y/N
+  C-002    query params  &          Rec.    Rec.    Y/N    Y/N    Y/N
+  C-003    host + port   :          Rec.    Rec.    Y/N    Y/N    Y/N
+  C-004    path + ext    .          Rec.    Rec.    Y/N    Y/N    Y/N
+
+PART II COMPLETION CHECKLIST
+
+  Cache-key reconstruction
+  - [ ] Baseline established for each endpoint.
+  - [ ] Each dimension varied independently.
+  - [ ] Each dimension classified.
+  - [ ] Key map recorded with evidence.
+  - [ ] Cache-buster effectiveness verified.
+
+  Normalization
+  - [ ] Path normalization variants tested.
+  - [ ] Query normalization variants tested.
+  - [ ] Port normalization tested.
+  - [ ] Scheme normalization tested.
+  - [ ] Case normalization tested.
+  - [ ] Encoding and delimiter matrix tested.
+
+  Serialization and collisions
+  - [ ] Delimiter hypotheses formed.
+  - [ ] Collision requests constructed.
+  - [ ] Same-key behavior confirmed.
+  - [ ] Different-origin behavior confirmed.
+  - [ ] Clean retrieval proof captured.
+
+  Parameter cloaking
+  - [ ] Duplicate parameter behavior mapped.
+  - [ ] Alternate separators tested.
+  - [ ] Encoded delimiters tested.
+  - [ ] Cache and origin parsing compared.
+
+  Evidence
+  - [ ] Full request captures for each collision.
+  - [ ] Cache status evidence.
+  - [ ] Origin response evidence.
+  - [ ] Clean retrieval evidence.
+  - [ ] Security consequence documented.
+
+
+================================================================================
+PART III — WEB CACHE POISONING DETECTION
+================================================================================
+
+--------------------------------------------------------------------------------
+16. THE WCP DETECTION LOOP
+--------------------------------------------------------------------------------
+
+    Baseline request
+          |
+          v
+    Inject ONE candidate input with a unique marker
+          |
+          v
+    Does the ORIGIN response change?  ---No---> discard
+          | Yes
+          v
+    Is the input ABSENT from the cache key?  ---No---> Part II (keyed surface)
+          | Yes
+          v
+    Send a CLEAN request to the same key (no marker input)
+          |
+          v
+    Does the clean request return the modified content,
+    with a cache HIT or rising Age?
+          | Yes
+          v
+    CONFIRMED POISONING — assess impact
+
+Discipline: a reflected header is not a finding. A cache HIT is not a
+finding. Only a clean request retrieving modified content from cache is a
+finding.
+
+--------------------------------------------------------------------------------
+17. CANDIDATE UNKEYED HEADERS
+--------------------------------------------------------------------------------
+
+Test each independently, then in combinations.
+
+  Class              Headers
+  -----------------  ------------------------------------------------
+  Host / URL         X-Forwarded-Host, X-Forwarded-Scheme,
+                     X-Forwarded-Proto, X-Forwarded-Port,
+                     X-Forwarded-Server, X-Original-Host,
+                     X-Original-URL, X-Rewrite-URL, X-Host,
+                     X-HTTP-Host-Override, Forwarded
+  Content            Accept, Accept-Language, Accept-Encoding,
+                     User-Agent, Origin, Referer
+  Routing            X-Original-URL, X-Rewrite-URL, X-Forwarded-Prefix,
+                     X-Forwarded-Path
+  Method             X-HTTP-Method-Override, X-Method-Override,
+                     X-HTTP-Method
+  Application        X-Requested-With, X-Ajax, X-Debug,
+                     X-Forwarded-For, X-Real-IP
+
+TESTING METHOD
+
+  R1: baseline (no header)
+  R2: header: CACHE_TEST_<nonce>
+  R3: clean baseline again
+
+  Observation       Question
+  ----------------  ------------------------------------------------------
+  Origin changed?   Does R2 body differ from R1 body?
+  Key changed?      Does R2 create a distinct cache entry?
+  Reflected?        Does the marker appear in body, Location, JS,
+                    canonical, or meta?
+  Stored?           Is R2's body stored?
+  Clean retrieval?  Does R3 return R2's body?
+
+Do not stack multiple headers during discovery.
+
+--------------------------------------------------------------------------------
+18. HARMFUL SINK CATALOG
+--------------------------------------------------------------------------------
+
+An unkeyed input is only a finding if it reaches a dangerous sink.
+
+  Sink                    Example                           Significance
+  ----------------------  --------------------------------  -------------
+  HTML reflection         <input value="MARKER">            Stored XSS
+                                                             if unescaped
+  Script source           <script src="https://MARKER/      JS execution
+                          app.js">
+  Style source            <link href="https://MARKER/       CSS injection
+                          style.css">                        / UI redressing
+  Redirect Location       Location: https://MARKER/          Open redirect,
+                                                             phishing
+  Canonical link          <link rel="canonical"             SEO abuse,
+                          href="MARKER">                     URL poisoning
+  Open Graph metadata     <meta property="og:url"           Preview-link
+                          content="MARKER">                  abuse
+  JSON field              {"url": "MARKER"}                  Client-side
+                                                             injection
+  CORS reflection         Access-Control-Allow-Origin:      Cross-origin
+                          MARKER                             data theft
+  Error message           <div class="error">MARKER</div>    XSS if
+                                                             unescaped
+  Resource hints          <link rel="preload" href=         Resource
+                          "MARKER">                          substitution
+  Form action             <form action="MARKER">            Credential
+                                                             exfiltration
+  CSP report-uri          Content-Security-Policy:           Telemetry
+                          report-uri MARKER                  exfiltration
+  Cookie injection        Set-Cookie: name=MARKER            Session
+                                                             manipulation
+
+The sink determines impact. Classify each confirmed WCP by its sink.
+
+--------------------------------------------------------------------------------
+19. UNKEYED QUERY-STRING AND PARAMETER TESTING
+--------------------------------------------------------------------------------
+
+ENTIRE QUERY STRING IGNORED
+
+  /page?value=one
+  /page?value=two
+
+If the cache serves one response for both, and the origin would differ, a
+query-string-level poisoning surface exists.
+
+SELECTED QUERY PARAMETER FILTERED
+Commonly filtered parameters to test (verify, do not assume):
+
+  utm_source
+  utm_medium
+  utm_campaign
+  utm_content
+  utm_term
+  fbclid
+  gclid
+  msclkid
+  _ga
+  _gl
+  mc_eid
+  ref
+  source
+
+Test by sending the parameter and observing whether the cache key changes.
+
+REFLECTED QUERY PARAMETER
+
+  /search?q=MARKER
+
+If MARKER appears in the cached response and the cache key does not include
+"q", the response may be poisonable.
+
+CACHE-BUSTER CONFLICT
+Some caches strip known cache-busters such as "_cb", "cachebuster", or
+"cache_buster". If your nonce uses a stripped parameter, you cannot isolate
+the test. Use a random nonce in a parameter you have verified is keyed, or
+place the nonce in a keyed path segment.
+
+--------------------------------------------------------------------------------
+20. METHOD-OVERRIDE AND FAT-GET TESTING
+--------------------------------------------------------------------------------
+
+METHOD OVERRIDE
+
+  GET /endpoint HTTP/1.1
+  Host: example.com
+  X-HTTP-Method-Override: POST
+  Content-Type: application/x-www-form-urlencoded
+
+  malicious=1
+
+If the cache keys on GET but the origin processes it as POST, the response to
+a normal GET may be influenced by the attacker's body.
+
+Also test:
+
+  POST /endpoint HTTP/1.1
+  X-HTTP-Method-Override: GET
+
+FAT GET / BODY-ON-GET
+
+  GET /search HTTP/1.1
+  Host: example.com
+  Content-Length: 20
+
+  q=CACHE_TEST_<nonce>
+
+Check:
+  - Does the origin response differ from a bodyless GET?
+  - Does the cache store the bodyless response under the same key?
+  - Does a clean GET retrieve the poisoned body?
+
+Some CDNs reject GET-with-body; others silently pass it.
+
+--------------------------------------------------------------------------------
+21. WCP VERIFICATION AND CROSS-SESSION VALIDATION
+--------------------------------------------------------------------------------
+
+VERIFICATION SEQUENCE
+
+  1. Send baseline request, record response.
+  2. Send modified request with unique marker.
+  3. Confirm the marker appears in the response.
+  4. Confirm the response is stored (second identical modified request HIT,
+     or clean request HIT).
+  5. Send a CLEAN request without the marker input to the SAME key.
+  6. Confirm the clean request returns the marker-bearing response.
+  7. Confirm in a second controlled session (or unauthenticated session).
+  8. Stop once impact is proven.
+
+CROSS-SESSION RULES
+  - Use accounts you own.
+  - Use an unauthenticated browser or a second owned account.
+  - Do not access another user's data.
+  - If cross-session verification is not possible safely, explain the
+    limitation rather than overstating impact.
+
+CACHE LIFETIME ANALYSIS
+Record:
+  - max-age / s-maxage values.
+  - Observed Age at retrieval.
+  - Whether the entry survives across edge locations (if observable).
+  - Whether the entry can be refreshed by the attacker.
+  - Whether revalidation changes the stored response.
+
+--------------------------------------------------------------------------------
+22. WCP FALSE POSITIVES
+--------------------------------------------------------------------------------
+
+Not sufficient:
+  - Reflected header.
+  - Cache HIT.
+  - Age greater than zero.
+  - Public Cache-Control.
+  - Body difference between two requests.
+  - A scanner result.
+  - A theoretical unkeyed header.
+
+Sufficient only with clean-retrieval proof and demonstrated impact.
+
+PART III COMPLETION CHECKLIST
+
+  Discovery
+  - [ ] Candidate headers tested individually.
+  - [ ] Candidate headers tested in combinations (after individual mapping).
+  - [ ] Candidate query parameters tested.
+  - [ ] Filtered query parameters identified.
+  - [ ] Method-override tested.
+  - [ ] Fat-GET tested.
+
+  Sink analysis
+  - [ ] Harmful sink identified for each reflected input.
+  - [ ] Sink type recorded.
+  - [ ] Impact class determined.
+
+  Verification
+  - [ ] Storage confirmed.
+  - [ ] Clean retrieval confirmed.
+  - [ ] Cross-session impact confirmed (or limitation explained).
+  - [ ] Cache lifetime recorded.
+  - [ ] Revalidation behavior recorded.
+
+  Evidence
+  - [ ] Baseline request and response captured.
+  - [ ] Modified request and response captured.
+  - [ ] Clean retrieval request and response captured.
+  - [ ] Second-session evidence captured.
+  - [ ] False positives eliminated.
+
+
+================================================================================
+PART IV — WEB CACHE DECEPTION DETECTION
+================================================================================
+
+--------------------------------------------------------------------------------
+23. WCD CONCEPT AND PRECONDITIONS
+--------------------------------------------------------------------------------
+
+WCD exploits a discrepancy between how the cache and origin interpret a URL.
+
+  Origin sees:  dynamic route    -> private response
+  Cache sees:   static resource  -> cacheable
+
+WCD is valid only when all of the following are true:
+
+  Precondition                Meaning
+  --------------------------  -----------------------------------------
+  Sensitive origin response   Origin returns user-specific/private data
+  Cacheable classification    Cache rule treats URL as cacheable
+  Interpretation discrepancy  Cache and origin interpret URL differently
+  Actual storage              Sensitive response actually stored
+  Unauthorized retrieval      Request without original auth context
+                              retrieves it
+
+Missing any step means the WCD claim is incomplete.
+
+--------------------------------------------------------------------------------
+24. STATIC EXTENSION RULES
+--------------------------------------------------------------------------------
+
+Common cacheable extensions:
+
+  .css  .js  .jpg  .jpeg  .png  .gif  .svg  .ico
+  .woff  .woff2  .ttf  .otf  .eot  .map  .webp  .avif
+  .mp4  .webm  .pdf  .zip  .txt  .xml  .json
+
+TEST SEQUENCE
+  1. Authenticate and request the private endpoint (baseline).
+  2. Request the endpoint with a static suffix appended.
+  3. Compare bodies.
+  4. Inspect Content-Type, Cache-Control, X-Cache, Age.
+  5. Repeat the request to check storage.
+  6. Send a clean unauthenticated request to the same URL.
+  7. Compare with the authenticated baseline.
+
+EXAMPLE REQUESTS
+
+  GET /account                (baseline)
+  GET /account/profile.css    (extension)
+  GET /account/profile.js     (extension)
+  GET /account/profile.jpg    (extension)
+  GET /account/nonexistent.css
+
+Do not assume that a non-existent path returns 404. The origin may route
+/account/<anything> to the account view.
+
+--------------------------------------------------------------------------------
+25. PATH MAPPING DISCREPANCIES
+--------------------------------------------------------------------------------
+
+  Discrepancy                  Example
+  ---------------------------  ------------------------------------------
+  Extra path segment ignored   /account/foo -> /account
+  Semicolon as path argument   /account;foo -> /account
+  Trailing slash ignored       /account/ -> /account
+  Dot-segment resolution       /account/../account -> /account
+  Encoded slash                /account%2ffoo -> /account/foo
+  Encoded dot                  /account/%2e%2e/foo -> /account/../foo
+  Case insensitivity           /Account -> /account
+  Null-byte truncation         /account%00.css -> /account
+
+TEST MATRIX
+
+  URL                                    Cache routes to  Origin routes to
+  -------------------------------------  ---------------  ----------------
+  /account/profile.css                   static?          dynamic?
+  /account/anything.css                  static?          dynamic?
+  /account/../account/profile.css        dynamic?         dynamic?
+  /account%2fprofile.css                 static?          dynamic?
+  /account%00.css                        static?          dynamic?
+  /Account/profile.css                   static?          dynamic?
+
+Record both interpretations. The gap is the exploit surface.
+
+--------------------------------------------------------------------------------
+26. DELIMITER DISCREPANCIES
+--------------------------------------------------------------------------------
+
+Characters that different servers treat as delimiters:
+
+  Character   Encoded   Role
+  ----------  --------  -------------------------------------------
+  Semicolon   %3b       Path parameter separator
+  Question    %3f       Query separator
+  Hash        %23       Fragment
+  Null        %00       Historical truncation
+  Slash       %2f       Path separator
+  Dot         %2e       Dot-segment resolution
+  Backslash   %5c       Windows path separator
+
+TEST VECTORS
+
+  /account;a.css
+  /account%3ba.css
+  /account/..%2fa.css
+  /account%00.css
+  /account%23.css
+  /account%3f.css
+  /account%5c..%5ca.css
+
+For each: does the cache treat it as static? Does the origin route it to the
+account view?
+
+SEMICOLON SPECIFICS
+Path parameters such as ";jsessionid=" are commonly stripped by caches but
+respected by application servers. If the origin strips the semicolon and
+routes to the dynamic view while the cache treats it as part of the static
+filename, WCD may be possible.
+
+--------------------------------------------------------------------------------
+27. NORMALIZATION DISCREPANCIES
+--------------------------------------------------------------------------------
+
+DOUBLE ENCODING
+
+  /account/%252e%252e/foo
+  /account/%2e%2e/foo
+  /account/..%2ffoo
+
+One layer may decode once; another may decode twice.
+
+SLASH HANDLING
+
+  /account//profile.css
+  /account/./profile.css
+  /account/../account/profile.css
+
+CASE NORMALIZATION
+
+  /Account/Profile.CSS
+  /account/profile.CSS
+
+TEST APPROACH
+  1. Send the baseline dynamic URL and record cache status.
+  2. Send the normalized variant.
+  3. Compare cache status and body.
+  4. If the cache and origin behave differently, the discrepancy exists.
+  5. Attempt to make the cache key look static while the origin returns the
+     dynamic view.
+
+--------------------------------------------------------------------------------
+28. STATIC DIRECTORY RULES
+--------------------------------------------------------------------------------
+
+Some caches apply special rules to directory prefixes:
+
+  /static/  /assets/  /images/  /img/  /scripts/  /js/  /css/  /media/
+  /uploads/  /public/  /files/  /fonts/
+
+TEST VECTORS
+
+  /static/../account/profile
+  /static/%2e%2e/account/profile
+  /static/..%2faccount/profile
+  /assets/../account/profile
+  /uploads/../account/profile
+
+If the origin resolves the traversal to the dynamic route while the cache
+classifies the path under a static prefix, WCD is possible.
+
+PREFIX MATCHING VERSUS PREFIX STRIPPING
+Some caches match the prefix but do not strip it. Others strip the prefix
+and cache the remainder. Test both behaviors.
+
+--------------------------------------------------------------------------------
+29. EXACT FILENAME RULES
+--------------------------------------------------------------------------------
+
+Some caches special-case filenames:
+
+  robots.txt  index.html  favicon.ico  sitemap.xml
+  manifest.json  crossdomain.xml  security.txt
+
+TEST VECTORS
+
+  /robots.txt/../account/profile
+  /robots.txt%2f..%2faccount/profile
+  /favicon.ico/../account/profile
+  /index.html/../account/profile
+
+If the cache matches the filename prefix and caches aggressively, while the
+origin routes the traversal to the dynamic view, WCD is possible.
+
+--------------------------------------------------------------------------------
+30. CONTENT-TYPE MISMATCH AND ARMOR ANALYSIS
+--------------------------------------------------------------------------------
+
+CONTENT-TYPE MISMATCH
+
+  REQUEST:  /account/profile.css
+  RESPONSE: Content-Type: text/html
+
+Caches that check extension only will cache it. Caches that check
+Content-Type (Cache Deception Armor or similar) will not.
+
+Record Content-Type for every WCD candidate. Mismatch is a strong signal that
+the cache may be caching the wrong thing.
+
+CACHE DECEPTION ARMOR BEHAVIOR (CLOUDFLARE)
+Checks that the URL extension matches the returned Content-Type. If a
+mismatch is found, Cloudflare does not cache the response.
+
+Documented exceptions:
+  - If the returned Content-Type is application/octet-stream, the extension
+    does not matter because that is typically a signal to instruct the
+    browser to save the asset instead of displaying it.
+  - Cloudflare allows .jpg to be served as image/webp, .gif as video/webm,
+    and other low-risk conversions.
+
+BYPASS DIRECTIONS TO TEST
+
+  Direction              Description
+  ---------------------  --------------------------------------------
+  MIME-type spoof        Origin returns application/octet-stream for
+                         .css
+  Image conversion       .jpg -> image/webp, .png -> image/avif
+  Missing Content-Type   Origin omits Content-Type; armor may fail open
+  Multipart responses    Some multipart responses evade the check
+  SVG variant            .svg served as text/html may still be cached
+
+IMPORTANT LIMITATION
+Cache Deception Armor depends on Origin Cache Control. A Cache-Control
+header from the origin, or an Edge Cache TTL Cache Rule, may override the
+protection.
+
+--------------------------------------------------------------------------------
+31. WCD VERIFICATION AND CROSS-SESSION VALIDATION
+--------------------------------------------------------------------------------
+
+VERIFICATION SEQUENCE
+
+  1. Authenticate and request the private endpoint (baseline).
+  2. Record the sensitive response (only data belonging to your test
+     account).
+  3. Request the deceptive URL while authenticated.
+  4. Confirm the origin resolves it to the dynamic endpoint (body contains
+     the same private data).
+  5. Confirm the cache stores it (second request HIT, or clean request HIT).
+  6. Send a clean unauthenticated request to the deceptive URL.
+  7. Confirm the private data is returned without authentication.
+  8. Stop once impact is proven.
+
+CROSS-SESSION RULES
+  - Use accounts you own.
+  - Use an unauthenticated session for retrieval proof.
+  - Do not retrieve another user's data.
+  - Limit captured data to a harmless sample from your own test account.
+
+CACHE LIFETIME ANALYSIS
+Record the same fields as Section 21 (Cache lifetime analysis).
+
+--------------------------------------------------------------------------------
+32. WCD FALSE POSITIVES
+--------------------------------------------------------------------------------
+
+Not sufficient:
+  - A static extension.
+  - A 200 response.
+  - A cached response.
+  - A private response in isolation.
+  - A body that differs from the unauthenticated view (the origin may render
+    a different view for a different reason).
+
+Sufficient only with:
+  - Sensitive response from your own test account.
+  - Deceptive URL resolving to the dynamic endpoint.
+  - Cache storing the response.
+  - Unauthenticated retrieval of the same sensitive data.
+
+PART IV COMPLETION CHECKLIST
+
+  Discovery
+  - [ ] Sensitive dynamic endpoints identified.
+  - [ ] Authenticated baseline recorded.
+  - [ ] Static extensions tested.
+  - [ ] Path mapping tested.
+  - [ ] Delimiter discrepancies tested.
+  - [ ] Normalization discrepancies tested.
+  - [ ] Static directory rules tested.
+  - [ ] Exact filename rules tested.
+
+  Defense analysis
+  - [ ] Content-Type inspected for every candidate.
+  - [ ] Cache Deception Armor behavior tested (where applicable).
+  - [ ] Bypass directions attempted on isolated keys.
+
+  Verification
+  - [ ] Storage confirmed.
+  - [ ] Unauthenticated retrieval confirmed.
+  - [ ] Sensitive data limited to own test account.
+  - [ ] Cache lifetime recorded.
+  - [ ] False positives eliminated.
+
+
+================================================================================
+PART V — CDN, API, GRAPHQL, CORS, AND TOOLING
+================================================================================
+
+--------------------------------------------------------------------------------
+33. CDN-SPECIFIC CACHE BEHAVIOR
+--------------------------------------------------------------------------------
+
+CLOUDFLARE
+  - Default cacheability by file extension, not MIME type.
+  - HTML not cached by default.
+  - Cache Deception Armor optional and checks Content-Type consistency.
+  - Cache Rules can override default behavior per path.
+  - Workers can implement custom cache keys.
+
+  Testing implications:
+    - Focus WCD on static-extension paths.
+    - Test Cache Rules coverage for authenticated routes.
+    - Test Cache Deception Armor bypasses.
+    - Inspect CF-Cache-Status, CF-Ray, Age.
+
+AKAMAI
+  - Property-level cache-key configuration.
+  - CP codes and match rules define cacheable extensions and paths.
+  - EdgeWorkers may alter keys or responses.
+
+  Testing implications:
+    - Enumerate cacheable CP codes.
+    - Test path and extension boundaries.
+    - Test header-based cache keys.
+
+FASTLY
+  - VCL-based cache key. Highly configurable.
+  - Varnish-family parser behavior is relevant to cache rules.
+  - Header normalization may differ from origin.
+
+  Testing implications:
+    - Map the effective key from response headers (X-Served-By, X-Cache,
+      X-Cache-Hits).
+    - Test delimiter and normalization behavior.
+
+VARNISH
+  - Cache key is typically req.url + host.
+  - VCL can add or remove dimensions.
+  - Review X-Varnish, Age, Via.
+
+NGINX
+  - Default key: $scheme$proxy_host$uri$is_args$args.
+  - proxy_cache_key misconfiguration is a common root cause.
+  - Underscore and concatenation injection is a historical vector.
+  - X-Cache-Status: HIT/MISS/BYPASS/EXPIRED.
+
+APPLICATION AND FRAMEWORK CACHES
+
+  Framework   Indicators
+  ----------  ----------------------------------------------------------
+  Drupal      X-Drupal-Cache, X-Drupal-Dynamic-Cache
+  Rails       Rack::Cache, X-Rack-Cache
+  Symfony     X-Symfony-Cache
+  Django      Cache middleware headers
+
+Framework caches can create cache issues without a visible CDN HIT header.
+
+QUIRK TABLE
+Build a per-engagement table:
+
+  Provider   Headers seen   Key dimensions observed   Quirks
+  ---------  -------------  ------------------------  ------------
+
+Do not test from provider name. Test from observed behavior.
+
+--------------------------------------------------------------------------------
+34. API CACHE DETECTION
+--------------------------------------------------------------------------------
+
+APIs frequently cache by URL while returning user-specific data.
+
+CROSS-SESSION TEST
+
+  Request A: GET /api/users/1  (User A session)
+  Request B: GET /api/users/1  (User B session)
+
+If B returns A's data from cache, cross-user exposure exists.
+
+VARY AND CACHE-CONTROL
+Inspect:
+  - Vary: Authorization, Cookie, Origin.
+  - Cache-Control: private, no-store.
+  - X-Cache-Status, CF-Cache-Status.
+
+TENANT ISOLATION
+
+  Request A: /api/tenant/alpha/data  (tenant alpha session)
+  Request B: /api/tenant/beta/data   (tenant beta session)
+
+If B returns alpha's data, tenant isolation is broken by the cache.
+
+TOKEN AND ERROR LEAKAGE
+Cached error responses may include stack traces, tokens, or internal
+headers. Inspect cached 4xx and 5xx responses for sensitive content.
+
+--------------------------------------------------------------------------------
+35. GRAPHQL CACHE DETECTION
+--------------------------------------------------------------------------------
+
+GraphQL is sometimes cached despite being POST. Behavior varies:
+  - Key on URL only (POST /graphql).
+  - Key on raw body (rare).
+  - Key on normalized query (directives, aliases, whitespace stripped).
+
+URL-ONLY KEY TEST
+
+  POST /graphql   {"query":"{ user { email } }"}
+  POST /graphql   {"query":"{ admin { secret } }"}
+
+If both return the same cached response, key confusion exists.
+
+GET-BASED GRAPHQL
+
+  GET /graphql?query={user{email}}
+
+Test whether the query is keyed.
+
+PERSISTED QUERIES
+Test whether persisted-query hashes are keyed vs resolved per request.
+
+NORMALIZATION
+Test whether directives (@include, @skip), aliases, or whitespace changes
+collapse to the same cache key.
+
+--------------------------------------------------------------------------------
+36. CORS AND CACHE VARIATION
+--------------------------------------------------------------------------------
+
+Caches that ignore the Origin header can serve CORS-augmented responses
+across origins.
+
+  1. Send request with Origin: https://attacker.example.
+  2. Inspect Access-Control-Allow-Origin.
+  3. Send the same request with a different Origin.
+  4. If the cache returns the first Origin's ACAO to the second request,
+     a CORS cache-confusion bug exists.
+
+This is a cache vulnerability because the cache fails to key on Origin.
+Frame the finding as cache misbehavior, not as generic CORS misconfiguration.
+
+Check Vary: Origin and whether the cache honors it.
+
+--------------------------------------------------------------------------------
+37. TOOLING
+--------------------------------------------------------------------------------
+
+  Tool                  Purpose
+  --------------------  ------------------------------------------------
+  Burp Suite            Interception, recon, Repeater, Comparer,
+                        Intruder, Scanner (confirm manually)
+  Param Miner           Header and parameter discovery, cache-busting
+                        via $randomplz
+  WCVS (Hackmanit)      Fast CLI scanner: unkeyed headers/parameters,
+                        parameter cloaking, fat GET, method override,
+                        path parameter, path traversal, special
+                        characters, static extension, normalized path;
+                        crawler, JSON report, proxy routing, rate
+                        limiting
+  cacheprobe            Go package: cache detection (X-Cache, Age,
+                        CF-Cache-Status); unkeyed header injection; fat
+                        GET probe; Cache-Control misconfiguration; Vary
+                        analysis; cache-buster
+  autopoisoner          Additional poisoning automation (second opinion)
+  Custom scripts        Nonce generation, timing/Age tracking, request
+                        matrices, body hashing, cross-session replay
+
+RECOMMENDED HYBRID
+
+  WCVS        -> breadth
+  Param Miner -> depth
+  Manual Burp -> confirmation and chaining
+  Custom      -> evidence and reproducibility
+
+Automated findings are hypotheses until manually confirmed.
+
+--------------------------------------------------------------------------------
+38. EVIDENCE COLLECTION
+--------------------------------------------------------------------------------
+
+For every finding, save:
+  - Baseline request and response (full headers, body).
+  - Modified request and response.
+  - Clean request and response (proving cache retrieval).
+  - Second-session retrieval (proving cross-user impact).
+  - Cache status headers at each step.
+  - Age values at each step.
+  - Time between requests.
+  - Account context used.
+  - Any cache-busting nonce and its effect.
+
+Evidence must be reproducible by a reviewer without additional tools.
+
+PART V COMPLETION CHECKLIST
+
+  CDN
+  - [ ] CDN provider identified.
+  - [ ] CDN-specific headers recorded.
+  - [ ] Cache Rules and key configuration probed.
+  - [ ] Cache Deception Armor behavior tested (where applicable).
+  - [ ] Quirk table built for the engagement.
+
+  API and GraphQL
+  - [ ] API cross-session tests executed.
+  - [ ] Tenant isolation tested (where applicable).
+  - [ ] GraphQL URL-only key tested.
+  - [ ] GraphQL GET-based caching tested.
+  - [ ] Persisted queries tested.
+  - [ ] Normalization of GraphQL queries tested.
+
+  CORS
+  - [ ] Origin keying tested.
+  - [ ] Vary: Origin honored or ignored.
+  - [ ] Cross-origin response reuse verified or ruled out.
+
+  Tooling
+  - [ ] Tooling output manually confirmed.
+  - [ ] Automated findings treated as hypotheses until confirmed.
+  - [ ] Evidence preserved in a reproducible format.
+
+
+================================================================================
+PART VI — IMPACT, REPORTING, AND REMEDIATION
+================================================================================
+
+--------------------------------------------------------------------------------
+39. IMPACT CHAINS
+--------------------------------------------------------------------------------
+
+WCP TO STORED XSS
+
+  Unkeyed input reflects into HTML or JS
+        |
+        v
+  Cache stores poisoned response
+        |
+        v
+  Clean request retrieves it
+        |
+        v
+  Victim browser executes attacker content
+
+  Required evidence:
+    - Input influences response.
+    - Input absent from key.
+    - Response stored.
+    - Clean retrieval.
+    - Executable context confirmed.
+
+WCP TO OPEN REDIRECT
+
+  Unkeyed input reflects into Location
+        |
+        v
+  Cache stores the redirect
+        |
+        v
+  Clean request receives the redirect
+
+  Required evidence:
+    - Redirect Location controlled by input.
+    - Cache HIT on clean request.
+    - Victim redirected (no client-side validation blocking it).
+
+WCD TO SENSITIVE DATA EXPOSURE
+
+  Authenticated user visits deceptive URL
+        |
+        v
+  Origin returns private data
+        |
+        v
+  Cache stores it as a static resource
+        |
+        v
+  Unauthenticated request retrieves it
+
+  Required evidence:
+    - Authenticated baseline.
+    - Deceptive URL resolves to dynamic view.
+    - Cache stores the response.
+    - Unauthenticated retrieval returns the same data.
+
+WCD TO CSRF TOKEN EXPOSURE
+
+  Cached page contains CSRF token
+        |
+        v
+  Attacker retrieves cached page
+        |
+        v
+  Attacker uses token in a separate CSRF scenario
+
+  Caveats:
+    - Tokens may be session-bound.
+    - Tokens may expire.
+    - SameSite cookies may block.
+    - Fetch Metadata and origin validation may block.
+    - A leaked token does not automatically prove a successful CSRF.
+
+CACHE-KEY INJECTION TO ACCESS-CONTROL BYPASS
+
+  Two distinct requests
+        |
+        v
+  Same cache identity
+        |
+        v
+  Privileged response stored under public key
+        |
+        v
+  Public request retrieves privileged response
+
+  Required evidence:
+    - Same identity.
+    - Different origin processing.
+    - Clean retrieval.
+    - Demonstrated privilege boundary crossing.
+
+CPDOS TO AVAILABILITY LOSS
+
+  Attacker poisons a benign key with an error response
+        |
+        v
+  Clean requests receive the error
+        |
+        v
+  Endpoint is unavailable for the cache lifetime
+
+  Required evidence:
+    - Error response stored under a benign key.
+    - Clean request retrieves the error.
+    - Impact measured within authorized limits.
+
+--------------------------------------------------------------------------------
+40. SEVERITY FACTORS
+--------------------------------------------------------------------------------
+
+Do not assign severity based only on the vulnerability label.
+
+  Factor              Question
+  ------------------  ------------------------------------------------
+  Data sensitivity    How sensitive is the affected content?
+  User count          How many users are affected?
+  Attacker privilege  Does the attacker need an account?
+  Victim interaction  Is a victim visit required?
+  Cache lifetime      How long does the poisoned entry persist?
+  Refreshability      Can the attacker refresh the entry?
+  Scope               One endpoint or many?
+  Impact type         Confidentiality, integrity, availability, or
+                      combination
+  Reliability         Is exploitation deterministic?
+  Defense status      Are existing controls absent, partial, or bypassed?
+
+--------------------------------------------------------------------------------
+41. REPORT STRUCTURE
+--------------------------------------------------------------------------------
+
+TITLE
+Describe the actual vulnerability, not the category.
+
+Examples:
+  - Web Cache Poisoning via Unkeyed X-Forwarded-Host Header
+  - Web Cache Deception Exposes Authenticated Account Information
+  - Cache-Key Injection Allows Cross-Request Response Collision
+  - Web Cache Poisoning Enables Persistent JavaScript Injection
+
+SUMMARY
+Root cause in a few sentences.
+
+AFFECTED ENDPOINT
+Exact route and environment.
+
+PRECONDITIONS
+Account, authentication, victim interaction, browser, cache state.
+
+STEPS TO REPRODUCE
+  1. Baseline request.
+  2. Modified request.
+  3. Origin response.
+  4. Cache evidence (HIT, Age).
+  5. Clean retrieval request.
+  6. Independent session result.
+
+IMPACT
+Demonstrated confidentiality, integrity, or availability impact.
+
+REMEDIATION
+Cache-key correction, trusted-header stripping, Cache-Control, URL
+normalization alignment, cache isolation, CDN rule changes.
+
+--------------------------------------------------------------------------------
+42. EVIDENCE THAT STRENGTHENS REPORTS
+--------------------------------------------------------------------------------
+
+WCP
+  - Same cache key for different requests.
+  - Different origin responses.
+  - Stored response contains controlled marker.
+  - Clean request HIT.
+  - Retrieval without modified input.
+  - Demonstrated cross-session impact.
+
+WCD
+  - Authenticated response contains sensitive data.
+  - Deceptive URL reaches dynamic origin route.
+  - Cache stores the response as cacheable.
+  - Unauthenticated retrieval returns the same data.
+
+CACHE-KEY INJECTION
+  - Two distinct raw requests.
+  - Same serialized key.
+  - Different origin responses.
+  - Clean request retrieves the unintended response.
+
+CPDOS
+  - Error response stored under a benign key.
+  - Clean request retrieves the error.
+  - Availability impact measured.
+
+--------------------------------------------------------------------------------
+43. REMEDIATION
+--------------------------------------------------------------------------------
+
+CACHE-KEY DESIGN
+  - Every response-shaping request component must be keyed, or the response
+    must not be shared.
+  - Prefer structured, escaped key construction.
+  - Avoid delimiter-based concatenation of attacker-controlled values.
+
+TRUSTED HEADERS
+  - Strip untrusted forwarded headers at the trust boundary.
+  - Set trusted values explicitly.
+  - Trust only known proxies.
+  - Do not generate absolute URLs from client-supplied host values.
+
+AUTHENTICATED RESPONSES
+  - Use Cache-Control: private, no-store for sensitive responses.
+  - Ensure CDN configuration does not override.
+  - Verify Vary covers authentication-relevant headers.
+
+URL PARSING ALIGNMENT
+Ensure CDN, proxy, web server, and application agree on:
+  - Percent decoding.
+  - Slash handling.
+  - Dot-segment resolution.
+  - Delimiter interpretation.
+  - Path rewriting.
+  - Query parameter parsing.
+
+CACHE RULES
+  - Avoid broad extension-based caching.
+  - Prefer explicit static-resource routes.
+  - Validate Content-Type for static caching.
+  - Enable CDN protections such as Cache Deception Armor and test their
+    bypasses.
+
+INPUT SURFACE
+  - Disable unnecessary forwarded headers and request overrides.
+  - Reduce the accepted input surface.
+
+CLIENT-SIDE
+  - Fix XSS, unsafe URL generation, and open redirects.
+  - A cache does not make them unexploitable.
+
+PART VI COMPLETION CHECKLIST
+
+  Impact
+  - [ ] Impact chain identified.
+  - [ ] Each link in the chain proven.
+  - [ ] Affected users identified.
+  - [ ] Attacker privileges identified.
+  - [ ] Victim interaction identified.
+  - [ ] Cache lifetime established.
+  - [ ] Cross-session impact established.
+
+  Reporting
+  - [ ] Title describes the actual vulnerability.
+  - [ ] Summary explains root cause.
+  - [ ] Preconditions documented.
+  - [ ] Reproduction steps are minimal and safe.
+  - [ ] Evidence is reproducible.
+  - [ ] Impact is demonstrated, not theoretical.
+  - [ ] Remediation provided.
+
+  Remediation
+  - [ ] Cache-key correction recommended.
+  - [ ] Trusted-header stripping recommended.
+  - [ ] Cache-Control recommendations provided.
+  - [ ] URL normalization alignment recommended.
+  - [ ] CDN rule changes recommended.
+
+
+================================================================================
+PART VII — MASTER CHECKLIST, MENTAL MODELS, RESEARCH INDEX, CONCLUSION
+================================================================================
+
+--------------------------------------------------------------------------------
+44. MASTER TESTING CHECKLIST
+--------------------------------------------------------------------------------
+
+RECONNAISSANCE
+  - [ ] CDN identified.
+  - [ ] Reverse proxies identified.
+  - [ ] Cache-related response headers identified.
+  - [ ] Public endpoints enumerated.
+  - [ ] Authenticated endpoints enumerated.
+  - [ ] API endpoints enumerated.
+  - [ ] Static directories and extensions enumerated.
+  - [ ] Likely cacheable pages enumerated.
+
+CACHE BEHAVIOR
+  - [ ] Baseline recorded for each endpoint.
+  - [ ] Repeated request compared.
+  - [ ] HIT/MISS behavior mapped.
+  - [ ] Age inspected.
+  - [ ] Cache-Control inspected.
+  - [ ] Vary inspected.
+  - [ ] Cookie bypass tested.
+  - [ ] Query-string keying tested.
+  - [ ] Cross-session behavior tested.
+
+CACHE-KEY RECONSTRUCTION
+  - [ ] Each dimension varied independently.
+  - [ ] Each dimension classified.
+  - [ ] Key map recorded.
+  - [ ] Cache-buster effectiveness verified.
+  - [ ] Normalization variants tested.
+  - [ ] Delimiter matrix tested.
+  - [ ] Collision attempts executed.
+  - [ ] Clean-retrieval proof captured where collision suspected.
+
+UNKEYED INPUTS
+  - [ ] Host and URL headers tested.
+  - [ ] Content and representation headers tested.
+  - [ ] Routing and rewrite headers tested.
+  - [ ] Method-override tested.
+  - [ ] Application headers tested.
+  - [ ] Query parameters tested.
+  - [ ] Fat-GET tested.
+  - [ ] Harmful sinks identified.
+
+WCP VERIFICATION
+  - [ ] Storage confirmed.
+  - [ ] Clean retrieval confirmed.
+  - [ ] Cross-session impact confirmed.
+  - [ ] Cache lifetime recorded.
+  - [ ] Revalidation behavior recorded.
+  - [ ] False positives eliminated.
+
+WCD
+  - [ ] Sensitive dynamic endpoints identified.
+  - [ ] Authenticated baseline recorded.
+  - [ ] Static extensions tested.
+  - [ ] Path mapping tested.
+  - [ ] Delimiters tested.
+  - [ ] Normalization tested.
+  - [ ] Static directory rules tested.
+  - [ ] Exact filename rules tested.
+  - [ ] Content-Type inspected.
+  - [ ] Cache Deception Armor behavior tested.
+  - [ ] Storage confirmed.
+  - [ ] Unauthenticated retrieval confirmed.
+  - [ ] Sensitive data limited to own test account.
+
+CPDOS
+  - [ ] HHO tested on isolated keys.
+  - [ ] HMC tested on isolated keys.
+  - [ ] HMO tested on isolated keys.
+  - [ ] Availability impact measured within authorized limits.
+
+SECONDARY SURFACES
+  - [ ] API cross-session tested.
+  - [ ] Tenant isolation tested.
+  - [ ] GraphQL URL-only key tested.
+  - [ ] GraphQL GET-based caching tested.
+  - [ ] CORS and cache tested.
+  - [ ] CDN-specific quirks tested.
+
+IMPACT AND REPORTING
+  - [ ] Affected users identified.
+  - [ ] Attacker privileges identified.
+  - [ ] Victim interaction identified.
+  - [ ] Cache lifetime established.
+  - [ ] Cross-session impact established.
+  - [ ] Evidence saved.
+  - [ ] Exploitation stopped after proof.
+  - [ ] Remediation provided.
+
+--------------------------------------------------------------------------------
+45. MENTAL MODELS
+--------------------------------------------------------------------------------
+
+MODEL 1 — WCP
+
+  Input changes origin response
+  + Input absent from cache key
+  + Harmful response stored
+  + Clean request retrieves it
+  = Web Cache Poisoning
+
+MODEL 2 — WCD
+
+  Origin sees dynamic route
+  + Cache sees cacheable resource
+  + Sensitive response stored
+  + Unauthorized request retrieves it
+  = Web Cache Deception
+
+MODEL 3 — CACHE-KEY INJECTION
+
+  Two distinct requests
+        |
+        v
+  Cache normalizes or serializes them
+        |
+        v
+  Same cache identity
+        |
+        v
+  Different origin behavior
+        |
+        v
+  Potential poisoning, ACL bypass, or CPDoS
+
+MODEL 4 — EXPLOITABILITY
+
+  A cache observation is not a vulnerability.
+
+  Always establish:
+    1. Exact request behavior.
+    2. Cache interpretation.
+    3. Origin interpretation.
+    4. Response generated.
+    5. Whether stored.
+    6. Who can retrieve it.
+    7. Actual security impact.
+
+THE FIVE GOVERNING QUESTIONS
+
+  1. What is the cache key?
+  2. Which inputs affect origin but not key?
+  3. How do cache and origin interpret the URL differently?
+  4. Can a harmful or sensitive response actually be stored?
+  5. Can an ordinary or unauthorized request retrieve it?
+
+If all five are answered with reproducible evidence, the finding is complete.
+
+--------------------------------------------------------------------------------
+46. RESEARCH INDEX
+--------------------------------------------------------------------------------
+
+FOUNDATIONAL
+  - PortSwigger Web Cache Poisoning
+    https://portswigger.net/web-security/web-cache-poisoning
+  - PortSwigger Web Cache Deception
+    https://portswigger.net/web-security/web-cache-deception
+  - PortSwigger Practical Web Cache Poisoning
+    https://portswigger.net/research/practical-web-cache-poisoning
+  - PortSwigger Exploiting Cache Implementation Flaws
+    https://portswigger.net/web-security/web-cache-poisoning/exploiting-
+    implementation-flaws
+  - RFC 9111 HTTP Caching
+    https://www.rfc-editor.org/rfc/rfc9111
+  - OWASP WSTG
+    https://owasp.org/www-project-web-security-testing-guide/
+
+KEY RESEARCH (2024–2026)
+  - YesWeHack, "Cache key injection: Smuggling poison through the door"
+    (September 2026): keyed-fragment attack surface; Nginx concatenation;
+    ACL bypass, WCD without interaction, CPDoS, scheme-confusion XSS;
+    bypassing edge cache to poison origin cache.
+  - PortSwigger, "Gotta cache 'em all: bending the rules of web cache
+    exploitation": URL parser discrepancies, delimiter ambiguities,
+    arbitrary WCP/WCD across CDNs.
+  - CVE-2025-57752 / CVE-2025-55173: Next.js Image Optimization cache key
+    confusion.
+  - CVE-2025-53693 / CVE-2025-53691 / CVE-2025-53694: Sitecore cache
+    poisoning to RCE chain.
+  - CVE-2025-69202: axios-cache-interceptor cache key ignores Authorization
+    -> auth bypass.
+  - CVE-2025-73946: Cache Key Canonicalization Collision.
+  - CVE-2025-49005: Next.js cache poisoning via middleware rewrite key
+    separation.
+
+TOOLING
+  - Param Miner (Burp BApp Store)
+  - WCVS (Hackmanit)
+    https://github.com/Hackmanit/Web-Cache-Vulnerability-Scanner
+  - cacheprobe (Go package)
+  - autopoisoner
+
+CASE STUDIES
+  - Intigriti, YesWeHack, PentesterLab, Payatu, System Weakness,
+    InfoSec Writeups, and Medium case studies on WCP and WCD.
+  - Real-world bounty reports including PayPal, Shopify, Glassdoor,
+    Mozilla, TikTok cache-related findings.
+
+An entry in this index does not imply independent verification of every
+paragraph.
+
+--------------------------------------------------------------------------------
+47. CONCLUSION
+--------------------------------------------------------------------------------
+
+Web cache vulnerabilities are not about finding a cache HIT or manipulating a
+header. They are about understanding how different components of a web
+architecture interpret requests, construct cache identities, generate
+responses, and decide what can be stored and reused.
+
+The most productive methodology combines:
+  - HTTP caching fundamentals.
+  - Cache-key analysis on both unkeyed and keyed surfaces.
+  - Cache-key injection and serialization analysis.
+  - Parser-discrepancy exploitation.
+  - CDN-specific behavior investigation.
+  - Application-level and fragment cache investigation.
+  - API and GraphQL caching analysis.
+  - CORS and tenant-isolation analysis.
+  - Controlled cross-session validation.
+
+The strongest reports demonstrate the complete chain from root cause to real
+security impact, with minimal and safe reproduction steps.
+
+CORE PRINCIPLE
+
+  Never stop at a strange cache behavior. Understand the cache, understand
+  the origin, prove the stored response, and demonstrate who can receive it.
+
+================================================================================
+END OF MANUAL — VERSION 4.0
+================================================================================
