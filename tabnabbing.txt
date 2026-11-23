@@ -1,0 +1,1586 @@
+# TABNABBING & REVERSE TABNABBING
+# THE COMPLETE ADVANCED DETECTION, VALIDATION, EXPLOITABILITY & REPORTING FRAMEWORK
+
+Document Classification: Advanced Web Application Security Reference  
+Primary Testing Domain: Client-Side Security  
+Primary Weakness: CWE-1022 — Use of Web Link to Untrusted Target with window.opener Access  
+Related Standards: OWASP WSTG, OWASP ASVS, HTML Living Standard  
+Testing Scope: Authorized penetration testing and bug bounty programs  
+Methodology: Passive-first, controlled active validation
+
+================================================================================
+01. EXECUTIVE OVERVIEW
+================================================================================
+
+Tabnabbing is a browser-based phishing technique that abuses the behavior of browser tabs, windows, and browsing-context relationships.
+
+It can cause a legitimate-looking browser tab or window to display an attacker-controlled page, potentially misleading users into believing they are still interacting with a trusted application.
+
+Two important variations must be distinguished:
+
+A. TRADITIONAL TABNABBING
+
+A user opens an untrusted page in another tab. The page remains in the background and subsequently changes its own content to imitate a trusted website.
+
+When the user returns to that tab, the content may appear to be a legitimate login or authentication page.
+
+This technique does not necessarily require access to window.opener.
+
+B. REVERSE TABNABBING
+
+A legitimate application opens an untrusted page in a new browsing context while retaining an opener relationship.
+
+The newly opened page can potentially navigate the original page through window.opener.location.
+
+This can facilitate phishing, impersonation, and unauthorized navigation.
+
+Reverse tabnabbing is primarily associated with:
+
+- HTML anchor elements.
+- target="_blank".
+- Explicit rel="opener".
+- JavaScript window.open().
+- Unsafe browsing-context relationships.
+- User-controlled external links.
+- Third-party destinations.
+
+CORE SECURITY OBJECTIVE
+
+Determine whether an attacker can cause an application-originating browsing context to retain an unsafe relationship with an untrusted destination, and whether that relationship permits unauthorized navigation or other meaningful security impact.
+
+A missing security attribute is not automatically proof of an exploitable vulnerability.
+
+================================================================================
+02. SECURITY CLASSIFICATION AND REFERENCES
+================================================================================
+
+Primary CWE:
+- CWE-1022: Use of Web Link to Untrusted Target with window.opener Access.
+
+Related weaknesses and concepts:
+- CWE-451: User Interface Misrepresentation of Critical Information.
+- CWE-601: URL Redirection to Untrusted Site.
+- CWE-346: Origin Validation Error.
+- CWE-693: Protection Mechanism Failure.
+
+Important distinction:
+
+CWE-1022 is the most directly relevant classification for reverse tabnabbing.
+
+Do not automatically classify every phishing scenario as CWE-1022.
+
+Relevant security references:
+
+1. OWASP Web Security Testing Guide:
+   WSTG-CLNT-13 / Reverse Tabnabbing
+   https://wstg.owasp.org/latest/15-Client-side/13-Reverse_Tabnabbing/
+
+2. OWASP HTML5 Security Cheat Sheet:
+   https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html
+
+3. OWASP Reverse Tabnabbing:
+   https://owasp.org/www-community/attacks/Reverse_Tabnabbing
+
+4. MDN rel=noopener:
+   https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/rel/noopener
+
+5. MDN rel=noreferrer:
+   https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Attributes/rel/noreferrer
+
+6. MITRE CWE-1022:
+   https://cwe.mitre.org/data/definitions/1022.html
+
+7. PortSwigger Web Security Academy:
+   https://portswigger.net/web-security
+
+================================================================================
+03. BROWSER SECURITY ARCHITECTURE
+================================================================================
+
+Understanding browser relationships is essential for accurate detection.
+
+3.1 BROWSING CONTEXTS
+
+A browsing context represents an environment in which a document is displayed.
+
+Examples:
+
+- Original browser tab.
+- Newly opened browser tab.
+- Browser window.
+- Embedded iframe.
+- Named browsing context.
+
+When a page opens another browsing context, the browser may establish an opener relationship.
+
+The relevant JavaScript property is:
+
+    window.opener
+
+Possible outcomes:
+
+    window.opener === null
+
+    window.opener !== null
+
+Interpretation:
+
+NULL:
+No accessible opener reference is available through this property.
+
+NON-NULL:
+An opener relationship exists and requires further security evaluation.
+
+Important:
+A non-null opener does not automatically mean an exploitable vulnerability exists. Origin restrictions, browser behavior, navigation policies, and application context must also be evaluated.
+
+3.2 WINDOW.OPEN
+
+JavaScript can create a new browsing context using:
+
+    window.open(url, target, features)
+
+Important parameters:
+
+- url
+- target
+- windowFeatures
+
+Security-sensitive features include:
+
+- noopener
+- noreferrer
+
+Example of a safer implementation:
+
+    window.open(
+        externalUrl,
+        "_blank",
+        "noopener,noreferrer"
+    );
+
+The resulting browsing context should not retain an opener relationship.
+
+3.3 HTML ANCHOR ELEMENT
+
+Example:
+
+    <a href="https://external.example"
+       target="_blank">
+       Open external website
+    </a>
+
+Modern browsers implicitly apply noopener behavior to ordinary target="_blank" links.
+
+However, explicitly specifying security attributes remains recommended for clarity, consistency, and compatibility.
+
+3.4 SAME-ORIGIN AND CROSS-ORIGIN RESTRICTIONS
+
+The same-origin policy restricts access to another origin's document and JavaScript objects.
+
+Origins are determined by:
+
+- Scheme.
+- Host.
+- Port.
+
+For example:
+
+    https://app.example.com
+    https://attacker.example.net
+
+These are different origins.
+
+A cross-origin opener relationship does not grant unrestricted DOM access.
+
+However, permitted navigation operations can still create security consequences.
+
+Important distinction:
+
+CROSS-ORIGIN ACCESS:
+Restricted access to the original document.
+
+CROSS-ORIGIN NAVIGATION:
+Certain navigation operations may remain possible.
+
+Therefore, same-origin policy must not be treated as a complete defense against reverse tabnabbing.
+
+================================================================================
+04. ATTACK SURFACE ENUMERATION
+================================================================================
+
+Identify every application feature that creates or renders links and new browsing contexts.
+
+4.1 STATIC HTML LINKS
+
+Search for:
+
+    target="_blank"
+
+    target='_blank'
+
+    target="_new"
+
+    target="_parent"
+
+    target="_top"
+
+    target="externalWindow"
+
+Inspect:
+
+- href.
+- target.
+- rel.
+- Dynamically generated attributes.
+- Whether the destination is user-controlled.
+- Whether the destination is trusted.
+- Whether the application explicitly requests opener access.
+
+Do not assume every non-self target is vulnerable.
+
+4.2 JAVASCRIPT WINDOW OPERATIONS
+
+Search for:
+
+    window.open()
+
+    open()
+
+    window.opener
+
+    window.location
+
+    window.location.href
+
+    window.location.assign()
+
+    window.location.replace()
+
+    opener.location
+
+    opener.postMessage()
+
+Investigate:
+
+- Whether the new context receives an opener.
+- Whether noopener is used.
+- Whether noreferrer is required.
+- Whether the URL is user-controlled.
+- Whether a named browsing context is reused.
+- Whether the application deliberately requires opener functionality.
+
+4.3 USER-CONTROLLED LINK SOURCES
+
+Prioritize:
+
+- User profiles.
+- Profile descriptions.
+- Comments.
+- Reviews.
+- Forum posts.
+- Messaging systems.
+- Support tickets.
+- Uploaded HTML documents.
+- Rich-text editors.
+- Markdown renderers.
+- CMS content.
+- External resource directories.
+- Partner integrations.
+- Custom dashboard widgets.
+- Notification systems.
+- User-generated navigation menus.
+
+4.4 APPLICATION COMPONENTS
+
+Inspect:
+
+- Header navigation.
+- Footer links.
+- Social media links.
+- Documentation links.
+- Help center links.
+- Payment gateway links.
+- OAuth authorization links.
+- Third-party integrations.
+- Download links.
+- File previews.
+- External report links.
+- Search results.
+- Advertisement links.
+
+4.5 FRAMEWORK-LEVEL SURFACES
+
+React:
+- JSX target attributes.
+- window.open().
+- dangerouslySetInnerHTML.
+- Components rendering external links.
+- Third-party link components.
+
+Angular:
+- Dynamic href bindings.
+- target bindings.
+- Renderer2.
+- Template-generated links.
+- External navigation services.
+
+Vue:
+- Dynamic href.
+- Dynamic target.
+- v-html.
+- Programmatic navigation.
+- Component-generated links.
+
+Next.js:
+- Custom Link wrappers.
+- External anchor elements.
+- Client-side navigation.
+- Server-rendered external links.
+
+Svelte:
+- Dynamic anchor attributes.
+- Event handlers.
+- Programmatic window operations.
+
+jQuery:
+- Dynamically generated anchor elements.
+- DOM manipulation.
+- Event delegation.
+- HTML insertion.
+
+The objective is to inspect the rendered browser behavior, not merely framework source code.
+
+================================================================================
+05. PASSIVE DETECTION METHODOLOGY
+================================================================================
+
+PHASE 1 — APPLICATION DISCOVERY
+
+1. Identify application entry points.
+2. Enumerate reachable pages.
+3. Identify authentication and unauthenticated areas.
+4. Identify user-generated content.
+5. Identify third-party integrations.
+6. Identify pages containing external links.
+7. Identify JavaScript-heavy functionality.
+
+Maintain a testing inventory.
+
+Suggested columns:
+
+- URL.
+- Page title.
+- Link location.
+- Link destination.
+- Target attribute.
+- Rel attribute.
+- Link source.
+- User-controlled destination.
+- Browser behavior.
+- Initial finding.
+- Validation status.
+
+PHASE 2 — HTML INSPECTION
+
+Inspect the rendered DOM.
+
+Example:
+
+    document.querySelectorAll("a[target]")
+
+Extract relevant information:
+
+    [...document.querySelectorAll("a[target]")].map(a => ({
+        href: a.href,
+        target: a.target,
+        rel: a.rel,
+        text: a.innerText
+    }));
+
+Inspect area elements:
+
+    [...document.querySelectorAll("area[target]")].map(a => ({
+        href: a.href,
+        target: a.target,
+        rel: a.rel
+    }));
+
+Inspect forms with target attributes:
+
+    [...document.querySelectorAll("form[target]")].map(f => ({
+        action: f.action,
+        target: f.target,
+        rel: f.rel
+    }));
+
+These checks provide an initial inventory, not a complete vulnerability determination.
+
+PHASE 3 — ATTRIBUTE ANALYSIS
+
+For every relevant link, evaluate:
+
+    target="_blank"
+
+    rel="noopener"
+
+    rel="noreferrer"
+
+    rel="opener"
+
+Interpretation:
+
+- noopener: Prevents the opened context from receiving the opener reference.
+- noreferrer: Suppresses referrer information and also implies noopener.
+- opener: Explicitly requests an opener relationship where supported.
+- Missing rel: Must be evaluated in the context of the target and browser behavior.
+
+Important:
+
+Do not report a modern target="_blank" anchor as exploitable solely because rel is missing.
+
+PHASE 4 — JAVASCRIPT SOURCE REVIEW
+
+Search the application source for:
+
+    window.open
+
+    window.opener
+
+    rel="opener"
+
+    target="_blank"
+
+    target = "_blank"
+
+    noreferrer
+
+    noopener
+
+For each match, trace:
+
+1. The source of the URL.
+2. Input validation.
+3. URL construction.
+4. The opening mechanism.
+5. The target browsing context.
+6. The opener relationship.
+7. The destination's trust level.
+8. The resulting security impact.
+
+PHASE 5 — DYNAMIC DOM INSPECTION
+
+Inspect links after:
+
+- Page load.
+- User interaction.
+- Modal opening.
+- AJAX responses.
+- SPA route transitions.
+- Component rendering.
+- Content loading.
+- Infinite scrolling.
+- Form submission.
+
+A page may generate links dynamically after its initial HTML response.
+
+PHASE 6 — DOM MUTATION MONITORING
+
+Use a MutationObserver during authorized testing to identify dynamically inserted links.
+
+Example:
+
+    const observer = new MutationObserver(records => {
+        for (const record of records) {
+            for (const node of record.addedNodes) {
+                if (node.nodeType !== Node.ELEMENT_NODE) {
+                    continue;
+                }
+
+                const links = [];
+
+                if (node.matches?.("a[target], area[target]")) {
+                    links.push(node);
+                }
+
+                links.push(
+                    ...node.querySelectorAll?.(
+                        "a[target], area[target]"
+                    ) || []
+                );
+
+                for (const link of links) {
+                    console.log({
+                        href: link.href,
+                        target: link.target,
+                        rel: link.rel,
+                        text: link.textContent
+                    });
+                }
+            }
+        }
+    });
+
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+
+Stop monitoring when the assessment is complete:
+
+    observer.disconnect();
+
+================================================================================
+06. ADVANCED WINDOW.OPEN ANALYSIS
+================================================================================
+
+JavaScript-generated browsing contexts deserve separate investigation.
+
+Inspect every relevant call.
+
+Example:
+
+    window.open(externalUrl);
+
+Potential concerns:
+
+- Missing noopener feature.
+- Missing noreferrer feature.
+- User-controlled external URL.
+- Untrusted destination.
+- Explicit opener retention.
+- Named browsing-context reuse.
+- Unexpected popup behavior.
+
+Safer pattern:
+
+    window.open(
+        externalUrl,
+        "_blank",
+        "noopener,noreferrer"
+    );
+
+Important testing considerations:
+
+A. Check whether the third argument is actually supplied.
+
+B. Determine whether the browser honors the specified features.
+
+C. Check whether the application uses a named target.
+
+D. Check whether opener functionality is intentionally required.
+
+E. Verify the actual child context behavior rather than assuming that the source code guarantees a particular result.
+
+F. Check whether application code subsequently assigns an opener reference or implements another communication mechanism.
+
+G. Check whether a framework wrapper modifies the behavior.
+
+A particularly important distinction:
+
+    window.open(url, "_blank")
+
+and:
+
+    window.open(url, "_blank", "noopener")
+
+must not be treated as equivalent.
+
+================================================================================
+07. ACTIVE VALIDATION — CONTROLLED TESTING
+================================================================================
+
+Active validation should only be conducted with explicit authorization.
+
+Use a controlled test environment or a destination that you own.
+
+Never use a real phishing page, credential collection page, or impersonation of a third-party authentication service.
+
+7.1 TEST OBJECTIVE
+
+Determine whether an untrusted child browsing context can navigate its original opener.
+
+7.2 CONTROLLED TEST ENVIRONMENT
+
+Prepare:
+
+A. Authorized application page:
+   The page containing the link or JavaScript opening operation.
+
+B. Tester-controlled destination:
+   A separate page used only for security validation.
+
+C. Tester-controlled navigation marker:
+   A harmless endpoint displaying a unique test message.
+
+Example:
+
+    https://test-owned.example/tabnabbing-marker
+
+7.3 CONTROLLED CHILD-PAGE PROOF
+
+On the tester-controlled destination, use:
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Tabnabbing Security Test</title>
+    </head>
+    <body>
+        <h1>Controlled Security Test</h1>
+
+        <p id="result">Checking opener relationship...</p>
+
+        <script>
+            const result = document.getElementById("result");
+
+            if (window.opener === null) {
+                result.textContent =
+                    "No accessible opener relationship.";
+            } else {
+                result.textContent =
+                    "An opener relationship exists.";
+            }
+        </script>
+    </body>
+    </html>
+
+This is a preliminary relationship check.
+
+A non-null result does not alone establish that unauthorized navigation is possible.
+
+7.4 CONTROLLED NAVIGATION VALIDATION
+
+Only where the authorized test scope permits navigation testing, use a tester-owned marker URL.
+
+Example child-page JavaScript:
+
+    if (window.opener !== null) {
+        window.opener.location.href =
+            "https://test-owned.example/tabnabbing-marker";
+    }
+
+Expected observation:
+
+If the browser permits the operation, the original tab navigates to the controlled marker endpoint.
+
+This demonstrates a navigation capability without collecting credentials or impersonating a legitimate service.
+
+Record:
+
+- Original application URL.
+- Opened destination.
+- Browser and version.
+- Whether window.opener was null.
+- Whether navigation occurred.
+- Final destination.
+- Relevant console output.
+- Screenshot or video evidence.
+
+7.5 NEGATIVE CONTROL
+
+Repeat the same test using a properly isolated link:
+
+    <a href="https://test-owned.example/child"
+       target="_blank"
+       rel="noopener noreferrer">
+       Controlled security test
+    </a>
+
+Expected:
+
+    window.opener === null
+
+The original page should not be navigable through the child page's opener reference.
+
+7.6 TEST MATRIX
+
+Test the following independently:
+
+Case 1:
+target="_blank" without explicit rel.
+
+Case 2:
+target="_blank" with rel="noopener".
+
+Case 3:
+target="_blank" with rel="noreferrer".
+
+Case 4:
+target="_blank" with rel="opener".
+
+Case 5:
+window.open() without noopener.
+
+Case 6:
+window.open() with noopener.
+
+Case 7:
+window.open() with noreferrer.
+
+Case 8:
+User-controlled external destination.
+
+Case 9:
+Dynamically generated external link.
+
+Case 10:
+Named browsing-context behavior.
+
+For each case, record actual browser behavior.
+
+Do not assume that historical browser behavior applies to modern browsers.
+
+================================================================================
+08. TRADITIONAL TABNABBING ANALYSIS
+================================================================================
+
+Traditional tabnabbing does not necessarily depend on window.opener.
+
+Attack concept:
+
+1. A user opens an untrusted page.
+2. The user switches to another tab.
+3. The original page remains open.
+4. The untrusted page changes its own visible content.
+5. The user returns to the page.
+6. The user may mistake it for a legitimate authentication or application page.
+
+Security testing areas:
+
+- Background tab behavior.
+- Delayed content changes.
+- Page visibility events.
+- Dynamic document modification.
+- Favicon changes.
+- Page title changes.
+- Visual impersonation.
+- URL and origin awareness.
+
+Relevant browser APIs to inspect:
+
+    document.visibilityState
+
+    visibilitychange
+
+    document.title
+
+    document.querySelector("link[rel='icon']")
+
+The existence of these APIs is not a vulnerability.
+
+The security question is whether application behavior, trust assumptions, or user interaction creates a meaningful phishing risk.
+
+Traditional tabnabbing should be assessed separately from CWE-1022 opener-based reverse tabnabbing.
+
+================================================================================
+09. USER-CONTROLLED CONTENT ANALYSIS
+================================================================================
+
+This is one of the most important areas for real-world bug bounty assessments.
+
+Identify whether an attacker can introduce an external link that another user will open.
+
+Potential input locations:
+
+- Username/profile URL.
+- Biography.
+- Markdown content.
+- Comments.
+- Reviews.
+- Messages.
+- Discussion posts.
+- Rich-text content.
+- Custom HTML blocks.
+- Organization descriptions.
+- Shared documents.
+- Public resource submissions.
+
+Trace the complete data flow:
+
+    USER INPUT
+        |
+        v
+    INPUT VALIDATION
+        |
+        v
+    STORAGE
+        |
+        v
+    TEMPLATE / COMPONENT
+        |
+        v
+    DOM RENDERING
+        |
+        v
+    LINK GENERATION
+        |
+        v
+    BROWSING CONTEXT
+        |
+        v
+    SECURITY VALIDATION
+
+Investigate:
+
+- Can an attacker control href?
+- Can an attacker control target?
+- Can an attacker influence rel?
+- Can the application add rel automatically?
+- Is the URL sanitized?
+- Is the content stored?
+- Is the content rendered to other users?
+- Does the rendered link preserve the intended security attributes?
+- Can an untrusted destination establish an opener relationship?
+
+Do not confuse HTML injection, stored XSS, open redirects, and reverse tabnabbing.
+
+They are separate weaknesses and may require separate findings.
+
+================================================================================
+10. URL AND DESTINATION TRUST ANALYSIS
+================================================================================
+
+Inspect the destination independently of the opener relationship.
+
+Potential URL handling problems:
+
+- Unvalidated external URLs.
+- Scheme confusion.
+- Unexpected redirects.
+- Open redirect chains.
+- User-controlled hostnames.
+- Misleading link text.
+- Unicode hostname confusion.
+- Internationalized domain names.
+- URL parser inconsistencies.
+- Redirect destinations changing after validation.
+
+Test URL handling with benign, controlled URLs.
+
+Record:
+
+- Original href.
+- Parsed URL.
+- Final destination.
+- Redirect chain.
+- Link text.
+- Displayed hostname.
+- Actual hostname.
+
+Important:
+
+A link pointing to an external website is not automatically dangerous.
+
+A redirect to an external website is not automatically reverse tabnabbing.
+
+Establish the specific security mechanism before assigning a vulnerability classification.
+
+================================================================================
+11. ADVANCED STATIC ANALYSIS
+================================================================================
+
+Review the source code for the following patterns.
+
+HTML:
+
+    <a target="_blank">
+
+    <area target="_blank">
+
+    <form target="_blank">
+
+    <a rel="opener">
+
+JavaScript:
+
+    window.open(url)
+
+    window.open(url, target)
+
+    window.open(url, target, features)
+
+    window.opener
+
+    window.opener.location
+
+Framework patterns:
+
+    target="_blank"
+
+    target={dynamicTarget}
+
+    rel={dynamicRel}
+
+    :target="_blank"
+
+    :rel="dynamicRel"
+
+    [attr.target]="_blank"
+
+Investigate whether security attributes are:
+
+- Hardcoded.
+- Dynamically generated.
+- Conditionally applied.
+- Removed by components.
+- Overwritten by application code.
+- Added only to selected destinations.
+
+11.1 DATA-FLOW ANALYSIS
+
+Identify:
+
+SOURCE:
+User-controlled URL or untrusted destination.
+
+TRANSFORMATION:
+URL validation, component processing, template rendering.
+
+SINK:
+Anchor target, window.open(), browsing-context creation.
+
+SECURITY CONTROL:
+noopener, noreferrer, destination restrictions, appropriate isolation.
+
+SECURITY OUTCOME:
+Whether an untrusted browsing context retains a meaningful ability to affect the original application context.
+
+11.2 REPOSITORY SEARCH
+
+Examples for authorized source-code review:
+
+    grep -RniE \
+    'window\.open|window\.opener|target=["'\'']_blank|rel=["'\'']opener' \
+    ./src
+
+For a more comprehensive review, include:
+
+    grep -RniE \
+    'target=|noopener|noreferrer|window\.open|window\.opener' \
+    ./src
+
+These searches are starting points, not complete static analysis.
+
+Inspect generated HTML, compiled JavaScript, and framework components where relevant.
+
+================================================================================
+12. ADVANCED DYNAMIC ANALYSIS
+================================================================================
+
+Test the application in a real browser.
+
+Recommended observations:
+
+A. Initial page state.
+B. New browsing-context creation.
+C. Child context opener state.
+D. Browser console output.
+E. Navigation behavior.
+F. Final URL.
+G. Referrer behavior.
+H. Behavior after client-side route changes.
+I. Behavior after dynamic content rendering.
+J. Behavior across supported browser versions.
+
+Browser developer tools:
+
+- Elements panel.
+- Console panel.
+- Network panel.
+- Application panel.
+- Sources panel.
+- Performance panel.
+
+Useful browser inspection:
+
+    window.opener
+
+    window.location.origin
+
+    document.referrer
+
+    document.visibilityState
+
+For the child page, inspect:
+
+    window.opener === null
+
+For the original page, observe whether any unexpected navigation occurs.
+
+Do not treat document.referrer as a reliable indicator of opener isolation.
+
+Referrer information and opener relationships are separate security properties.
+
+================================================================================
+13. MODERN BROWSER BEHAVIOR
+================================================================================
+
+A critical part of advanced testing is accounting for browser evolution.
+
+Modern evergreen browsers generally provide implicit noopener behavior for ordinary anchor links using target="_blank".
+
+Consequently:
+
+- A missing explicit rel attribute does not automatically prove exploitability.
+- Explicit rel="opener" changes the security analysis.
+- window.open() requires separate investigation.
+- Legacy browsers may behave differently.
+- Browser-specific behavior must be documented.
+
+Test against the actual supported browser population.
+
+Suggested test environments:
+
+- Chromium-based browsers.
+- Mozilla Firefox.
+- Safari.
+- Supported mobile browsers.
+- Legacy browsers only when explicitly within scope.
+
+Record:
+
+- Browser name.
+- Exact version.
+- Operating system.
+- Testing date.
+- Link mechanism.
+- Opener result.
+- Navigation result.
+
+13.1 BROWSING CONTEXT GROUPS
+
+Investigate whether the application uses:
+
+- opener relationships.
+- named browsing contexts.
+- iframe navigation.
+- Cross-origin windows.
+- Cross-Origin-Opener-Policy.
+- Cross-origin redirects.
+
+13.2 CROSS-ORIGIN-OPENER-POLICY
+
+COOP can isolate browsing-context groups.
+
+Relevant response headers include:
+
+    Cross-Origin-Opener-Policy: same-origin
+
+And:
+
+    Cross-Origin-Opener-Policy: same-origin-allow-popups
+
+These policies have different compatibility and application behavior implications.
+
+COOP should be assessed as an additional isolation mechanism, not as a replacement for correct link and window.open handling.
+
+================================================================================
+14. FALSE POSITIVE ELIMINATION
+================================================================================
+
+Before reporting, investigate the following.
+
+FALSE POSITIVE 1:
+target="_blank" exists, but the browser implicitly applies noopener.
+
+FALSE POSITIVE 2:
+The destination is trusted and the application intentionally retains an opener relationship.
+
+FALSE POSITIVE 3:
+window.opener is non-null, but the relevant navigation operation cannot be demonstrated.
+
+FALSE POSITIVE 4:
+A security scanner reports missing noreferrer even though opener isolation is correctly enforced.
+
+FALSE POSITIVE 5:
+A URL is externally controlled, but the application opens it in an isolated context.
+
+FALSE POSITIVE 6:
+The destination is an open redirect, but no opener-based relationship exists.
+
+FALSE POSITIVE 7:
+The application has a separate stored XSS issue rather than a tabnabbing issue.
+
+FALSE POSITIVE 8:
+A proof of concept works only in an unsupported legacy browser.
+
+FALSE POSITIVE 9:
+The test uses a same-origin page and incorrectly assumes the result represents cross-origin behavior.
+
+FALSE POSITIVE 10:
+The test demonstrates an opener relationship but does not demonstrate a meaningful security consequence.
+
+FALSE POSITIVE 11:
+The scanner identifies a missing rel attribute on an element that does not create a relevant new browsing context.
+
+FALSE POSITIVE 12:
+The application has correctly isolated the new context through another verified browser mechanism.
+
+FINAL RULE:
+
+Do not report an exploitable reverse tabnabbing vulnerability solely because an automated tool finds a link with target="_blank".
+
+================================================================================
+15. EXPLOITABILITY ASSESSMENT
+================================================================================
+
+Use the following evidence model.
+
+LEVEL 0 — INFORMATIONAL OBSERVATION
+
+A link opens an external destination.
+
+No security weakness demonstrated.
+
+LEVEL 1 — POTENTIAL MISCONFIGURATION
+
+A potentially unsafe browsing-context configuration is identified.
+
+No actual opener capability demonstrated.
+
+LEVEL 2 — OPENER RELATIONSHIP CONFIRMED
+
+The child context has a non-null opener.
+
+Navigation impact remains unverified.
+
+LEVEL 3 — NAVIGATION CAPABILITY CONFIRMED
+
+A controlled destination can navigate the original browsing context.
+
+The relevant application behavior is reproducible.
+
+LEVEL 4 — SECURITY IMPACT ESTABLISHED
+
+The behavior is reachable by an attacker and can affect application users through a meaningful phishing or trust-boundary violation scenario.
+
+LEVEL 5 — ADDITIONAL IMPACT DEMONSTRATED
+
+Additional consequences are independently established, such as a broader application workflow or another separately validated security weakness.
+
+Do not automatically assign severity based on the level.
+
+Consider:
+
+- Attacker prerequisites.
+- Victim interaction.
+- Affected user population.
+- User-generated content exposure.
+- Destination control.
+- Authentication context.
+- Browser compatibility.
+- Application trust.
+- Reproducibility.
+- Actual security consequences.
+
+================================================================================
+16. IMPACT ANALYSIS
+================================================================================
+
+Potential security consequences include:
+
+1. Unauthorized navigation of the original application tab.
+2. Phishing through a visually convincing replacement page.
+3. User confusion regarding the active website.
+4. Credential disclosure if a user voluntarily enters credentials into an attacker-controlled page.
+5. Social engineering.
+6. Abuse of trusted external-link workflows.
+7. Reputational damage.
+8. Increased exposure to subsequent attacks.
+
+IMPORTANT LIMITATIONS:
+
+Reverse tabnabbing alone does not automatically provide:
+
+- Arbitrary JavaScript execution in the original origin.
+- Same-origin policy bypass.
+- Direct cookie theft.
+- Session token extraction.
+- Password extraction.
+- Authentication bypass.
+- Privilege escalation.
+- Server-side code execution.
+
+Any additional impact must be independently demonstrated.
+
+================================================================================
+17. AUTOMATED TESTING STRATEGY
+================================================================================
+
+A mature assessment should combine several testing approaches.
+
+A. PASSIVE HTML SCANNING
+
+Identify relevant target attributes and rel attributes.
+
+B. SOURCE CODE SCANNING
+
+Search JavaScript, HTML templates, and framework components.
+
+C. DATA-FLOW ANALYSIS
+
+Trace attacker-controlled URLs into browsing-context creation.
+
+D. DYNAMIC DOM SCANNING
+
+Detect dynamically inserted links.
+
+E. BROWSER VALIDATION
+
+Inspect actual opener behavior.
+
+F. CONTROLLED NAVIGATION TESTING
+
+Use a tester-owned destination to establish whether navigation is possible.
+
+G. REGRESSION TESTING
+
+Repeat after remediation.
+
+H. BROWSER COMPATIBILITY TESTING
+
+Validate the actual browser versions supported by the application.
+
+Automation must distinguish:
+
+- Potential findings.
+- Confirmed opener relationships.
+- Confirmed navigation capabilities.
+- Confirmed exploitable application behavior.
+
+================================================================================
+18. REMEDIATION AND DEFENSIVE IMPLEMENTATION
+================================================================================
+
+18.1 HTML ANCHORS
+
+Recommended:
+
+    <a href="https://external.example"
+       target="_blank"
+       rel="noopener noreferrer">
+       External resource
+    </a>
+
+Use noopener to isolate the opened browsing context.
+
+Use noreferrer when suppressing referrer information is also desired.
+
+18.2 JAVASCRIPT
+
+Recommended:
+
+    const openedWindow = window.open(
+        externalUrl,
+        "_blank",
+        "noopener,noreferrer"
+    );
+
+Review application compatibility before changing existing popup workflows.
+
+18.3 LINK COMPONENTS
+
+Create a centralized, security-reviewed component for external links.
+
+Its responsibilities should include:
+
+- Correct target handling.
+- Opener isolation.
+- Appropriate referrer policy.
+- URL validation.
+- Consistent behavior.
+- Security regression coverage.
+
+18.4 USER-GENERATED CONTENT
+
+Never assume that user-generated links are trustworthy.
+
+Apply:
+
+- URL scheme validation.
+- Appropriate destination restrictions.
+- Safe HTML rendering.
+- Context-aware output encoding.
+- Secure link generation.
+- Explicit opener isolation.
+
+18.5 CONTENT SECURITY POLICY
+
+CSP is useful for controlling script execution and other resource-loading behavior.
+
+However:
+
+CSP alone is not a direct substitute for noopener.
+
+18.6 REGRESSION CONTROLS
+
+Add automated tests that verify:
+
+- External links have the expected security attributes.
+- Dynamic components preserve security attributes.
+- window.open() uses the intended isolation features.
+- User-generated content cannot remove security protections.
+- The application does not unintentionally reintroduce opener relationships.
+
+================================================================================
+19. BUG BOUNTY REPORTING FRAMEWORK
+================================================================================
+
+Suggested title:
+
+Reverse Tabnabbing Through an Untrusted External Link Allows Navigation of the Original Application Tab
+
+Suggested weakness:
+
+CWE-1022 — Use of Web Link to Untrusted Target with window.opener Access.
+
+REPORT STRUCTURE:
+
+1. SUMMARY
+
+Describe the vulnerable functionality and the specific opener relationship.
+
+2. AFFECTED ASSET
+
+Provide the exact affected URL.
+
+3. AFFECTED COMPONENT
+
+Identify the link, component, or JavaScript function.
+
+4. PRECONDITIONS
+
+Explain the attacker capabilities and required victim interaction.
+
+5. REPRODUCTION STEPS
+
+Provide concise, reproducible steps.
+
+6. PROOF OF CONCEPT
+
+Include the controlled tester-owned destination and navigation marker.
+
+7. OBSERVED RESULT
+
+Explain whether the child browsing context can navigate the original tab.
+
+8. EXPECTED RESULT
+
+Explain the expected opener isolation.
+
+9. SECURITY IMPACT
+
+Describe the actual demonstrated consequences without exaggeration.
+
+10. REMEDIATION
+
+Recommend noopener, noreferrer where appropriate, and secure window.open usage.
+
+11. EVIDENCE
+
+Include:
+
+- Relevant DOM snippet.
+- Browser version.
+- Original URL.
+- Child URL.
+- Opener state.
+- Navigation result.
+- Screenshots.
+
+12. REPRODUCIBILITY
+
+State whether the issue was consistently reproduced.
+
+================================================================================
+20. SEVERITY ASSESSMENT
+================================================================================
+
+Severity should be determined from demonstrated impact and program-specific policy.
+
+INFORMATIONAL:
+
+A missing explicit security attribute without a demonstrated security weakness.
+
+LOW:
+
+A limited opener-related configuration issue with restricted exploitability and impact.
+
+MEDIUM:
+
+A reproducible reverse tabnabbing issue involving an attacker-controlled destination and meaningful victim-facing phishing risk.
+
+HIGH:
+
+Only where substantial additional impact is independently demonstrated and justified.
+
+CRITICAL:
+
+Reverse tabnabbing alone ordinarily does not justify a critical classification.
+
+Do not inflate severity based solely on hypothetical credential theft.
+
+Consider CVSS applicability, attack requirements, user interaction, and the bug bounty program's own severity criteria.
+
+================================================================================
+21. ADVANCED TESTING CHECKLIST
+================================================================================
+
+AUTHORIZATION AND SCOPE
+
+[ ] Target is explicitly in scope.
+[ ] Active testing is authorized.
+[ ] Controlled destination is available.
+[ ] No real credentials will be collected.
+[ ] No unauthorized users will be targeted.
+
+DISCOVERY
+
+[ ] Static HTML inspected.
+[ ] Dynamic DOM inspected.
+[ ] Anchor elements enumerated.
+[ ] Area elements inspected.
+[ ] Form targets inspected.
+[ ] window.open calls identified.
+[ ] window.opener references identified.
+[ ] User-generated content inspected.
+[ ] Framework link components inspected.
+[ ] Third-party integrations reviewed.
+
+SECURITY ATTRIBUTE ANALYSIS
+
+[ ] target behavior recorded.
+[ ] noopener behavior evaluated.
+[ ] noreferrer behavior evaluated.
+[ ] Explicit opener behavior evaluated.
+[ ] Dynamic attribute handling inspected.
+[ ] Named browsing-context behavior inspected.
+
+ACTIVE VALIDATION
+
+[ ] Child opener state checked.
+[ ] Cross-origin behavior evaluated.
+[ ] Controlled navigation attempted where authorized.
+[ ] Negative control completed.
+[ ] Browser version recorded.
+[ ] Final navigation destination recorded.
+[ ] Evidence collected.
+
+FALSE POSITIVE REVIEW
+
+[ ] Modern implicit noopener behavior considered.
+[ ] Legacy browser dependency evaluated.
+[ ] Open redirect distinguished.
+[ ] XSS distinguished.
+[ ] Same-origin behavior distinguished.
+[ ] Actual navigation impact established.
+[ ] Attacker prerequisites established.
+
+REPORTING
+
+[ ] CWE classification justified.
+[ ] Impact accurately described.
+[ ] Reproduction steps documented.
+[ ] Screenshots attached.
+[ ] Remediation provided.
+[ ] Severity justified.
+
+================================================================================
+22. FINAL ADVANCED TESTING METHODOLOGY
+================================================================================
+
+The recommended end-to-end workflow is:
+
+STEP 1 — SCOPE VALIDATION
+
+Confirm authorized assets and testing boundaries.
+
+STEP 2 — APPLICATION MAPPING
+
+Identify all pages and features that generate external links.
+
+STEP 3 — LINK ENUMERATION
+
+Enumerate anchors, forms, areas, and dynamically generated links.
+
+STEP 4 — JAVASCRIPT ENUMERATION
+
+Inspect window.open(), window.opener, and navigation-related logic.
+
+STEP 5 — INPUT-TO-SINK TRACING
+
+Determine whether an attacker can control a destination or influence link generation.
+
+STEP 6 — ATTRIBUTE ANALYSIS
+
+Evaluate target, rel, noopener, noreferrer, and opener.
+
+STEP 7 — BROWSER BEHAVIOR ANALYSIS
+
+Account for modern browser defaults and supported browser versions.
+
+STEP 8 — CONTROLLED VALIDATION
+
+Use a tester-owned destination and harmless navigation marker.
+
+STEP 9 — NEGATIVE CONTROL
+
+Repeat with proper opener isolation.
+
+STEP 10 — EXPLOITABILITY ASSESSMENT
+
+Establish attacker prerequisites, victim interaction, and actual impact.
+
+STEP 11 — FALSE POSITIVE ELIMINATION
+
+Remove findings that cannot demonstrate the claimed security weakness.
+
+STEP 12 — REPORT PREPARATION
+
+Provide reproducible evidence, accurate classification, and remediation.
+
+STEP 13 — REGRESSION VALIDATION
+
+Confirm that the remediation eliminates the demonstrated behavior.
+
+================================================================================
+23. FINAL SECURITY PRINCIPLES
+================================================================================
+
+1. Never equate target="_blank" with an exploitable vulnerability.
+
+2. Always distinguish traditional tabnabbing from reverse tabnabbing.
+
+3. Treat window.open() as a separate testing surface.
+
+4. Inspect actual browser behavior rather than relying exclusively on static HTML.
+
+5. Trace user-controlled destinations into the link-generation process.
+
+6. Understand same-origin policy and cross-origin navigation separately.
+
+7. Test modern browser defaults before reporting.
+
+8. Use controlled destinations for active validation.
+
+9. Do not collect credentials or impersonate real authentication services.
+
+10. Distinguish opener existence from demonstrated navigation capability.
+
+11. Distinguish navigation capability from practical phishing impact.
+
+12. Do not confuse tabnabbing with open redirects or XSS.
+
+13. Validate remediation using both positive and negative controls.
+
+14. Report only reproducible and technically supported findings.
+
+15. Prioritize actual security impact over scanner-generated findings.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+Document purpose:
+A comprehensive technical reference for the discovery, detection, validation, exploitability assessment, remediation, and reporting of tabnabbing and reverse tabnabbing in authorized web application security assessments.
