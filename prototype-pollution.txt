@@ -1,0 +1,3403 @@
+# THE COMPLETE JAVASCRIPT PROTOTYPE POLLUTION DETECTION FIELD MANUAL
+
+**Client-Side and Server-Side | Black-Box and White-Box Testing | Parser Analysis | Gadget Discovery | Non-Destructive Verification | Bug Bounty Research**
+
+**Edition:** 2.0  
+**Research snapshot:** November 24, 2026  
+**Primary purpose:** Authorized security testing, vulnerability research, bug bounty assessments, and secure code auditing.
+
+---
+
+# TABLE OF CONTENTS
+
+## PART I — FUNDAMENTALS
+1. What Is Prototype Pollution?
+2. JavaScript Objects and the Prototype Chain
+3. Own Properties vs. Inherited Properties
+4. The Three Dangerous Property Names
+5. JSON Parsing and Object-Literal Semantics
+6. How Prototype Pollution Happens
+7. Prototype Pollution vs. Related Vulnerabilities
+
+## PART II — VULNERABILITY ANATOMY
+8. The Source–Transformation–Sink–Gadget Model
+9. Prototype Pollution Sources
+10. Vulnerable Operations and Sinks
+11. Prototype Targets
+12. Common Vulnerable Coding Patterns
+13. Safe and Unsafe Object Operations
+
+## PART III — INPUT AND PARSER ANALYSIS
+14. Why Parser Identification Matters
+15. Query String Parsing
+16. JSON Body Parsing
+17. URL-Encoded Forms
+18. Multipart Form Data
+19. URL Fragments and Client-Side Routing
+20. postMessage and Web Messaging
+21. GraphQL and WebSockets
+22. File Imports and Deserialization
+23. Parser and Transformation Test Matrix
+
+## PART IV — CLIENT-SIDE DETECTION
+24. Client-Side Attack Surface Discovery
+25. Source Discovery
+26. URL-Based Testing
+27. Hash-Based Testing
+28. Web Messaging Testing
+29. Browser Console Verification
+30. DOM Invader Methodology
+31. Client-Side Gadget Discovery
+32. DOM XSS and Other Impact Analysis
+33. Third-Party JavaScript and Dependency Analysis
+
+## PART V — SERVER-SIDE DETECTION
+34. Server-Side Prototype Pollution
+35. Black-Box Detection Strategy
+36. Non-Destructive Behavioral Oracles
+37. Differential Response Testing
+38. Persistence and Worker Scope
+39. Framework-Specific Investigation
+40. Server-Side False Positives
+41. Safe Server-Side Confirmation
+
+## PART VI — GADGET DISCOVERY AND EXPLOITABILITY
+42. What Is a Gadget?
+43. Gadget Discovery Methodology
+44. Client-Side Gadget Categories
+45. Server-Side Gadget Categories
+46. Configuration and Options Gadgets
+47. Authentication and Authorization Gadgets
+48. Template and Serialization Gadgets
+49. Child Process and Environment Gadgets
+50. Prototype Pollution to RCE: Research Model
+51. Why a Gadget Does Not Automatically Mean RCE
+
+## PART VII — ADVANCED TESTING
+52. Dangerous-Key Filtering Analysis
+53. Alternative Property Paths
+54. Nested Object and Array Behavior
+55. Second-Order Prototype Pollution
+56. Multi-Stage and Multi-Parameter Testing
+57. Custom Prototype Pollution
+58. Prototype Freezing and Runtime Defenses
+59. Race Conditions and Concurrent Requests
+60. Caching, Load Balancing, and Distributed Workers
+
+## PART VIII — AUTOMATION AND TOOLS
+61. Burp Suite and DOM Invader
+62. Manual Burp Repeater Workflow
+63. Browser Developer Tools
+64. JavaScript Source Auditing
+65. Dependency and SBOM Analysis
+66. Static Analysis and Grep-Based Hunting
+67. Dynamic Analysis and Fuzzing
+68. Automated Scanner Limitations
+69. Building a Reproducible Testing Harness
+
+## PART IX — VALIDATION AND REPORTING
+70. Evidence Requirements
+71. False Positives
+72. Impact Classification
+73. Severity Assessment
+74. Safe Proof of Concept
+75. Bug Bounty Reporting
+76. Reproducibility Checklist
+77. Testing Worksheet
+
+## PART X — DEFENSE AND REFERENCES
+78. Prevention and Secure Coding
+79. Remediation Checklist
+80. Developer Review Checklist
+81. Research Resources
+82. Glossary
+
+---
+
+# PART I — FUNDAMENTALS
+
+## 1. What Is Prototype Pollution?
+
+Prototype pollution is a JavaScript vulnerability in which an attacker can influence properties of an object's prototype, causing those properties to become inherited by other objects.
+
+JavaScript uses prototype-based inheritance. Objects can inherit properties and methods from other objects through a prototype chain.
+
+If an attacker manages to modify a shared prototype, unrelated objects may begin inheriting attacker-controlled properties.
+
+For example, consider this conceptual demonstration:
+
+```javascript
+Object.prototype.researchMarker = "polluted";
+
+const first = {};
+const second = {};
+
+console.log(first.researchMarker);
+console.log(second.researchMarker);
+```
+
+Both objects can access the injected property because they inherit from `Object.prototype`.
+
+This example demonstrates the underlying JavaScript behavior. It is not, by itself, a demonstration of a remotely exploitable application vulnerability.
+
+A real vulnerability requires an attacker-controlled path to an unsafe operation that modifies a prototype.
+
+### 1.1 Why Prototype Pollution Matters
+
+Applications frequently use objects for:
+
+- Configuration.
+- User preferences.
+- API request data.
+- Application state.
+- Template options.
+- Feature flags.
+- Authorization decisions.
+- Serialization settings.
+- Dynamic property lookup.
+- Library configuration.
+
+If a property is inherited unexpectedly, application code may treat an attacker-controlled value as a legitimate configuration value.
+
+Possible consequences include:
+
+- DOM-based cross-site scripting.
+- Security control bypass.
+- Authentication or authorization logic manipulation.
+- Application behavior manipulation.
+- Denial of service.
+- Server-side code execution when a suitable gadget chain exists.
+
+Prototype pollution is generally a primitive that needs to be connected to application behavior before its full impact can be established.
+
+---
+
+## 2. JavaScript Objects and the Prototype Chain
+
+JavaScript objects can inherit properties from other objects.
+
+Consider:
+
+```javascript
+const user = {
+    username: "alice"
+};
+
+console.log(user.username);
+console.log(user.toString);
+```
+
+The first property belongs directly to `user`.
+
+The second property is inherited through the prototype chain.
+
+For an ordinary object, the simplified chain is:
+
+```text
+user
+  |
+  v
+Object.prototype
+  |
+  v
+null
+```
+
+When JavaScript evaluates:
+
+```javascript
+user.toString
+```
+
+it first checks whether `user` owns the property.
+
+If not, JavaScript checks the object's prototype.
+
+The search continues until the property is found or the chain ends.
+
+### 2.1 Inspecting a Prototype
+
+Use:
+
+```javascript
+Object.getPrototypeOf(user);
+```
+
+To inspect whether a property is directly owned:
+
+```javascript
+Object.hasOwn(user, "username");
+```
+
+To check whether a property exists anywhere in the prototype chain:
+
+```javascript
+"toString" in user;
+```
+
+These checks answer different questions.
+
+### 2.2 Prototype Chain Diagram
+
+```text
+             Object.prototype
+                    |
+                    |
+              user object
+                    |
+                    |
+              property lookup
+                    |
+                    v
+          own property checked
+                    |
+              not found?
+                    |
+                    v
+          inherited property checked
+                    |
+              not found?
+                    |
+                    v
+             next prototype
+```
+
+Understanding this lookup behavior is essential for identifying prototype pollution.
+
+---
+
+## 3. Own Properties vs. Inherited Properties
+
+This distinction is one of the most important parts of prototype pollution testing.
+
+Consider:
+
+```javascript
+const obj = {
+    username: "alice"
+};
+
+console.log(Object.hasOwn(obj, "username")); // true
+console.log(Object.hasOwn(obj, "toString")); // false
+
+console.log("username" in obj); // true
+console.log("toString" in obj); // true
+```
+
+The `in` operator checks both own and inherited properties.
+
+`Object.hasOwn()` checks only properties directly belonging to the object.
+
+### 3.1 Why This Matters During Verification
+
+Suppose a test produces:
+
+```javascript
+Object.prototype.pp_test = "confirmed";
+```
+
+A new object can inherit the property:
+
+```javascript
+const fresh = {};
+
+console.log(fresh.pp_test); // "confirmed"
+console.log(Object.hasOwn(fresh, "pp_test")); // false
+```
+
+This is different from an application simply reflecting a submitted value into an object.
+
+A reliable verification process should establish:
+
+1. The property exists.
+2. The property is inherited rather than directly owned.
+3. The relevant prototype is identified.
+4. The property was introduced through the tested input path.
+5. The behavior is reproducible.
+
+---
+
+## 4. The Three Dangerous Property Names
+
+Three property names deserve special attention.
+
+### 4.1 `__proto__`
+
+Historically, `__proto__` is a special accessor available on ordinary objects.
+
+It can expose or modify an object's prototype through certain property-access and assignment operations.
+
+Example:
+
+```javascript
+const obj = {};
+
+console.log(Object.getPrototypeOf(obj) === Object.prototype);
+```
+
+The important testing question is not simply whether the string `__proto__` is accepted.
+
+It is whether a particular transformation or assignment operation interprets it in a way that modifies a prototype.
+
+### 4.2 `constructor`
+
+Ordinary objects commonly inherit a `constructor` property.
+
+For an ordinary object:
+
+```javascript
+const obj = {};
+
+console.log(obj.constructor === Object);
+```
+
+The constructor function has a `prototype` property.
+
+This creates an alternate path to prototype-related structures.
+
+### 4.3 `prototype`
+
+Constructor functions commonly expose a `prototype` property.
+
+For example:
+
+```javascript
+function Example() {}
+
+console.log(Example.prototype);
+```
+
+The combination of `constructor` and `prototype` is important in recursive merge and path-based assignment vulnerabilities.
+
+### 4.4 Important Qualification
+
+The three strings do not automatically cause pollution.
+
+Their behavior depends on:
+
+- The source parser.
+- The resulting object structure.
+- The transformation function.
+- The destination object.
+- The operation used to write properties.
+- The runtime and library implementation.
+
+Never report a vulnerability solely because an application accepts one of these strings.
+
+---
+
+## 5. JSON Parsing and Object-Literal Semantics
+
+This is a frequent source of incorrect testing conclusions.
+
+### 5.1 JSON.parse()
+
+Consider:
+
+```javascript
+const data = JSON.parse(
+    '{"__proto__":{"researchMarker":"test"}}'
+);
+
+console.log(Object.hasOwn(data, "__proto__"));
+```
+
+The parsed object contains an own property named `__proto__`.
+
+`JSON.parse()` does not automatically modify `Object.prototype` merely because the input contains this key.
+
+### 5.2 JavaScript Object Literal
+
+Now compare:
+
+```javascript
+const data = {
+    "__proto__": {
+        researchMarker: "test"
+    }
+};
+```
+
+In an object literal, this syntax has special prototype-setting semantics.
+
+It is not equivalent to the JSON parsing example.
+
+### 5.3 Why This Matters for HTTP Testing
+
+A local test written in JavaScript may behave differently from an HTTP request containing JSON.
+
+When reproducing a vulnerability:
+
+- Use the same content type as the application.
+- Use the same parser.
+- Preserve the same nesting structure.
+- Verify the actual parsed object.
+- Reproduce the same merge or assignment operation.
+
+Do not substitute a JavaScript object literal for an HTTP JSON payload and assume the semantics are identical.
+
+---
+
+## 6. How Prototype Pollution Happens
+
+A common vulnerable pattern is recursively merging attacker-controlled objects into another object.
+
+Conceptually:
+
+```javascript
+function unsafeMerge(target, source) {
+    for (const key in source) {
+        if (
+            source[key] !== null &&
+            typeof source[key] === "object"
+        ) {
+            target[key] = target[key] || {};
+            unsafeMerge(target[key], source[key]);
+        } else {
+            target[key] = source[key];
+        }
+    }
+
+    return target;
+}
+```
+
+This is an intentionally simplified illustration of an unsafe implementation.
+
+The exact behavior depends on how the implementation handles:
+
+- Inherited properties.
+- Dangerous keys.
+- Arrays.
+- Null values.
+- Existing destination properties.
+- Property descriptors.
+- Recursive assignment.
+
+A real vulnerability may occur when an attacker-controlled key is interpreted as a special property during recursive processing.
+
+### 6.1 Typical Vulnerability Flow
+
+```text
+Attacker-controlled input
+          |
+          v
+       Parser
+          |
+          v
+  JavaScript object
+          |
+          v
+  Recursive transformation
+          |
+          v
+  Unsafe property assignment
+          |
+          v
+  Prototype modification
+          |
+          v
+  Inherited attacker-controlled property
+          |
+          v
+  Application gadget
+          |
+          v
+  Security impact
+```
+
+The key lesson is that a parser, a sink, and a gadget are different parts of the vulnerability.
+
+---
+
+## 7. Prototype Pollution vs. Related Vulnerabilities
+
+Prototype pollution is not the same as HTTP Parameter Pollution.
+
+| Vulnerability | Core issue |
+|---|---|
+| Prototype Pollution | Modification of object prototype properties |
+| HTTP Parameter Pollution | Duplicate or ambiguous HTTP parameters |
+| Mass Assignment | Unintended assignment of user-controlled fields |
+| Insecure Deserialization | Unsafe processing of serialized input |
+| DOM XSS | Attacker-controlled data reaches an executable browser context |
+| Command Injection | Attacker-controlled input reaches an operating-system command interpreter |
+
+These vulnerabilities may appear together in an attack chain, but they are not interchangeable.
+
+---
+
+# PART II — VULNERABILITY ANATOMY
+
+## 8. The Source–Transformation–Sink–Gadget Model
+
+Use this model for every investigation.
+
+```text
+SOURCE
+   |
+   v
+TRANSFORMATION
+   |
+   v
+POLLUTION SINK
+   |
+   v
+AFFECTED PROTOTYPE
+   |
+   v
+GADGET
+   |
+   v
+SENSITIVE OPERATION
+   |
+   v
+IMPACT
+```
+
+### 8.1 Source
+
+The attacker-controlled input.
+
+Examples:
+
+- Query parameter.
+- JSON body.
+- URL fragment.
+- postMessage data.
+- GraphQL variable.
+- WebSocket message.
+- Imported file.
+- User preference.
+- Stored configuration.
+
+### 8.2 Transformation
+
+The code that converts input into an object or changes its structure.
+
+Examples:
+
+- Query parser.
+- JSON parser.
+- URL decoder.
+- Recursive normalizer.
+- Object cloning.
+- Configuration loader.
+- Schema transformation.
+- Deserialization library.
+
+### 8.3 Pollution Sink
+
+The operation that modifies a prototype.
+
+Examples:
+
+- Unsafe recursive merge.
+- Dynamic property assignment.
+- Path-based assignment.
+- Unsafe cloning.
+- Vulnerable utility-library functions.
+
+### 8.4 Affected Prototype
+
+Identify what was modified.
+
+Potential targets include:
+
+- `Object.prototype`.
+- `Array.prototype`.
+- A custom class prototype.
+- An application-specific configuration prototype.
+- Another built-in prototype.
+
+### 8.5 Gadget
+
+Existing application code that reads a property influenced by the pollution.
+
+### 8.6 Impact
+
+The actual security consequence.
+
+Examples:
+
+- DOM XSS.
+- Authorization bypass.
+- Logic manipulation.
+- Denial of service.
+- RCE.
+
+### 8.7 Two Separate Confirmation Standards
+
+**Confirmed pollution:**
+
+You have demonstrated that attacker-controlled input changes a prototype.
+
+**Confirmed exploitable impact:**
+
+You have additionally demonstrated that an application gadget uses the polluted value to produce a security-relevant result.
+
+Do not confuse these two standards.
+
+---
+
+## 9. Prototype Pollution Sources
+
+Sources are locations where an attacker can introduce controlled property names and values.
+
+### 9.1 URL Query Parameters
+
+Example input shape:
+
+```text
+https://target.example/page?name=alice
+```
+
+Potentially interesting properties:
+
+- Bracket notation.
+- Dot notation.
+- Repeated parameters.
+- Nested parameter structures.
+- Array notation.
+- Encoded property names.
+
+A query parameter is only a candidate source until the application transforms it into a JavaScript object.
+
+### 9.2 URL Fragments
+
+Example:
+
+```text
+https://target.example/page#section
+```
+
+Fragments are not normally sent to the server in HTTP requests.
+
+They may nevertheless be read by client-side JavaScript.
+
+Interesting locations include:
+
+- Router initialization.
+- Hash-based navigation.
+- Analytics configuration.
+- Client-side state restoration.
+- Deep-link processing.
+
+### 9.3 JSON Request Bodies
+
+JSON is a common source because it supports nested objects.
+
+Investigate:
+
+- Profile updates.
+- Preference updates.
+- Configuration endpoints.
+- Search filters.
+- API request options.
+- Import/export functionality.
+- Bulk update operations.
+
+### 9.4 URL-Encoded Forms
+
+Applications may convert form data into nested JavaScript objects.
+
+The behavior depends on the form parser and its configuration.
+
+### 9.5 Multipart Form Data
+
+Multipart fields may be processed by middleware or custom upload handlers.
+
+Investigate:
+
+- File metadata.
+- Nested form fields.
+- Upload options.
+- Filenames.
+- Content metadata.
+- Import configuration.
+
+### 9.6 postMessage
+
+Applications frequently exchange objects between:
+
+- Parent windows.
+- Embedded frames.
+- Third-party widgets.
+- Payment integrations.
+- Authentication windows.
+- Browser extensions.
+
+A message handler that accepts an object and merges it into configuration is a potential source.
+
+Origin validation is important, but correct origin validation alone does not make an unsafe merge safe.
+
+### 9.7 Local Storage and Session Storage
+
+Consider:
+
+```javascript
+localStorage.getItem("preferences");
+```
+
+This retrieves a stored string.
+
+Compare that with:
+
+```javascript
+localStorage.preferences;
+```
+
+These are different access patterns.
+
+Investigate how stored strings are parsed and subsequently merged into application objects.
+
+### 9.8 GraphQL
+
+Potential sources include:
+
+- Nested input objects.
+- JSON-like scalar values.
+- Custom input transformation.
+- Resolver-level configuration merging.
+- Reusable filter and options objects.
+
+GraphQL itself does not automatically imply prototype pollution.
+
+### 9.9 WebSockets
+
+Investigate message handlers that:
+
+- Parse JSON.
+- Transform message objects.
+- Update application state.
+- Merge options.
+- Modify shared configuration.
+
+### 9.10 File Imports
+
+Potential file formats:
+
+- JSON.
+- YAML.
+- TOML.
+- Custom configuration files.
+
+A parser may produce an object that is later merged into application state.
+
+The parser's own behavior and the later transformation must be examined separately.
+
+---
+
+## 10. Vulnerable Operations and Sinks
+
+### 10.1 Recursive Merge
+
+Recursive merge functions are important because they traverse nested objects.
+
+Investigate whether the implementation:
+
+- Iterates over attacker-controlled keys.
+- Recursively processes nested values.
+- Uses unsafe assignment.
+- Checks dangerous keys.
+- Handles arrays safely.
+- Handles null and primitive values correctly.
+- Processes inherited properties.
+
+### 10.2 Dynamic Property Assignment
+
+Example:
+
+```javascript
+target[userControlledKey] = value;
+```
+
+Dynamic assignment is not automatically vulnerable.
+
+It becomes dangerous when the key can influence special property behavior or reach a sensitive prototype.
+
+### 10.3 Path-Based Assignment
+
+Example:
+
+```javascript
+setValue(target, userControlledPath, value);
+```
+
+The important question is how the path is parsed and traversed.
+
+Check:
+
+- String paths.
+- Array-form paths.
+- Nested paths.
+- Empty path components.
+- Encoded path components.
+- Type coercion.
+- Dangerous intermediate properties.
+
+### 10.4 Object.assign()
+
+`Object.assign()` copies enumerable own properties using ordinary assignment semantics on the target.
+
+This can invoke setters on the target.
+
+A source object containing an own `__proto__` property may therefore behave differently when copied into an ordinary target than when processed using object spread.
+
+### 10.5 Object Spread
+
+Example:
+
+```javascript
+const copy = { ...source };
+```
+
+Object spread creates own data properties on the new object rather than using ordinary assignment to set each destination property.
+
+It is not a universal defense against all prototype pollution patterns, but its semantics differ from `Object.assign()`.
+
+### 10.6 Utility Libraries
+
+Prioritize review of:
+
+- `lodash`.
+- `deep-extend`.
+- `merge-deep`.
+- `merge-options`.
+- `hoek`.
+- `jQuery.extend`.
+- Custom merge functions.
+- Configuration helper libraries.
+
+Do not infer vulnerability from a dependency name alone.
+
+Identify the actual installed version and the exact function used.
+
+---
+
+## 11. Prototype Targets
+
+Do not assume that every finding affects `Object.prototype`.
+
+### 11.1 Object.prototype
+
+The most commonly discussed target.
+
+Ordinary objects generally inherit from it.
+
+### 11.2 Array.prototype
+
+Arrays inherit from `Array.prototype`.
+
+A polluted array property may influence code that reads an inherited array property.
+
+### 11.3 Custom Class Prototypes
+
+Example:
+
+```javascript
+class UserConfig {
+    constructor() {
+        this.enabled = true;
+    }
+}
+```
+
+Objects created from this class inherit from `UserConfig.prototype`.
+
+A vulnerability may affect this prototype without changing `Object.prototype`.
+
+### 11.4 Other Built-in Prototypes
+
+Depending on the vulnerable operation, other built-in prototypes may be relevant.
+
+Always identify the actual object and prototype involved.
+
+---
+
+## 12. Common Vulnerable Coding Patterns
+
+Investigate code resembling these conceptual patterns:
+
+### Pattern A: Unfiltered recursive merge
+
+```javascript
+merge(destination, untrustedInput);
+```
+
+### Pattern B: User-controlled property name
+
+```javascript
+destination[key] = value;
+```
+
+### Pattern C: User-controlled path
+
+```javascript
+assignPath(destination, path, value);
+```
+
+### Pattern D: Configuration merging
+
+```javascript
+const options = merge(defaultOptions, requestOptions);
+```
+
+### Pattern E: Cloning untrusted objects
+
+```javascript
+const copied = deepClone(requestData);
+```
+
+### Pattern F: Dynamic options construction
+
+```javascript
+const config = {
+    ...defaults
+};
+
+applyOptions(config, requestOptions);
+```
+
+These are review targets, not automatic vulnerabilities.
+
+Trace the actual implementation and its behavior.
+
+---
+
+## 13. Safe and Unsafe Object Operations
+
+| Operation | Testing consideration |
+|---|---|
+| `JSON.parse()` | Does not automatically pollute a prototype |
+| `Object.assign()` | May invoke target setters |
+| Object spread | Creates own data properties |
+| `Object.create(null)` | Creates an object without a prototype |
+| `Map` | Stores keys without ordinary object property assignment |
+| Recursive merge | High-priority review target |
+| Dynamic assignment | Depends on key and destination |
+| Path assignment | Depends on path traversal and validation |
+| `Object.defineProperty()` | Depends on target and descriptor handling |
+
+The important principle is to understand the operation rather than memorizing a list of supposedly safe or unsafe APIs.
+
+---
+
+# PART III — INPUT AND PARSER ANALYSIS
+
+## 14. Why Parser Identification Matters
+
+The same HTTP input can produce different JavaScript objects depending on the parser.
+
+A parser may:
+
+1. Reject a dangerous key.
+2. Preserve it as an own property.
+3. Convert it into a nested object.
+4. Interpret it as an array.
+5. Normalize it.
+6. Remove it.
+7. Pass it to a later transformation.
+
+Therefore, payload syntax must match the target parser.
+
+A payload that works against one parser may be meaningless against another.
+
+---
+
+## 15. Query String Parsing
+
+Potential syntax families include:
+
+```text
+?name=alice
+```
+
+```text
+?user[name]=alice
+```
+
+```text
+?user.name=alice
+```
+
+```text
+?item[]=one&item[]=two
+```
+
+These are examples of different input structures, not equivalent parser instructions.
+
+### 15.1 Important Parser Questions
+
+- Does the parser support nested bracket notation?
+- Does it support dot notation?
+- Does it preserve duplicate parameters?
+- How does it handle arrays?
+- Does it limit nesting depth?
+- Does it limit the number of parameters?
+- Does it reject dangerous property names?
+- Does it create ordinary objects or null-prototype objects?
+- Does another library transform its output?
+
+### 15.2 `qs`
+
+The `qs` package supports nested query-string parsing.
+
+Its behavior depends on version and options.
+
+Pay particular attention to:
+
+- `allowPrototypes`.
+- `plainObjects`.
+- `depth`.
+- Parameter limits.
+- Array parsing.
+- Prototype-related key handling.
+
+Do not assume that bracket notation alone creates a prototype pollution vulnerability.
+
+### 15.3 `query-string`
+
+Treat `query-string` separately from `qs`.
+
+Do not assume it supports the same nested-object syntax or configuration options.
+
+Inspect the actual version and returned object.
+
+### 15.4 URLSearchParams
+
+The native `URLSearchParams` API does not automatically convert bracket notation into nested objects.
+
+For example, a parameter name containing brackets remains a parameter name unless additional code interprets it.
+
+Investigate the transformation after parsing.
+
+---
+
+## 16. JSON Body Parsing
+
+JSON parsing supports nested objects and arrays.
+
+A JSON request can contain an own property named `__proto__`.
+
+That does not automatically mean that the global prototype was modified.
+
+Investigate the entire processing chain:
+
+```text
+HTTP JSON body
+       |
+       v
+JSON parser
+       |
+       v
+Parsed object
+       |
+       v
+Validation / normalization
+       |
+       v
+Merge / assignment
+       |
+       v
+Potential prototype modification
+```
+
+Questions:
+
+- Is the input merged into an existing object?
+- Is the merge recursive?
+- Are dangerous keys filtered?
+- Are unknown fields rejected?
+- Are nested objects copied?
+- Is the object transformed by middleware?
+- Does the application use a custom clone function?
+
+---
+
+## 17. URL-Encoded Forms
+
+Typical content type:
+
+```text
+application/x-www-form-urlencoded
+```
+
+Test independently from JSON.
+
+The server may use different middleware for URL-encoded bodies.
+
+Investigate:
+
+- Extended versus simple parsing modes.
+- Nested field handling.
+- Bracket notation.
+- Repeated keys.
+- Arrays.
+- Parser limits.
+- Dangerous-key handling.
+
+A JSON endpoint being safe does not prove the form endpoint is safe.
+
+---
+
+## 18. Multipart Form Data
+
+Typical content type:
+
+```text
+multipart/form-data
+```
+
+Investigate:
+
+- Text fields.
+- File fields.
+- Nested metadata.
+- Upload configuration.
+- Middleware behavior.
+- File-import transformations.
+- Background processing.
+
+The multipart parser may be safe while a later application-level merge is vulnerable.
+
+---
+
+## 19. URL Fragments and Client-Side Routing
+
+The fragment is processed by the browser and client-side application code.
+
+Common sources:
+
+- `location.hash`.
+- Router initialization.
+- Deep-link parsing.
+- Client-side filter state.
+- Analytics configuration.
+- Navigation restoration.
+
+Trace the fragment from its origin to the object transformation.
+
+Do not assume the fragment reaches the server.
+
+---
+
+## 20. postMessage and Web Messaging
+
+Search for:
+
+```javascript
+window.addEventListener("message", handler);
+```
+
+Then inspect:
+
+- Whether `event.origin` is validated.
+- Whether `event.data` is validated.
+- Whether data is parsed or normalized.
+- Whether it is merged into an existing object.
+- Whether the resulting configuration reaches a sensitive operation.
+
+A secure message handler should validate both the sender and the message structure.
+
+---
+
+## 21. GraphQL and WebSockets
+
+### GraphQL
+
+Review:
+
+- Resolver input objects.
+- Custom scalar parsing.
+- Nested input types.
+- Filter construction.
+- Options merging.
+- Shared resolver configuration.
+
+### WebSockets
+
+Review:
+
+- Message event handlers.
+- JSON parsing.
+- Shared application state.
+- Message normalization.
+- Dynamic key assignment.
+- Configuration merging.
+
+Neither technology automatically causes prototype pollution. The application-level transformation is what matters.
+
+---
+
+## 22. File Imports and Deserialization
+
+Review every file-processing path that creates JavaScript objects.
+
+For YAML, inspect the parser version and whether safe parsing APIs are used.
+
+For JSON, distinguish parsing from later merging.
+
+For custom formats, inspect how keys are converted into object properties.
+
+A secure parser does not necessarily protect an unsafe transformation performed afterward.
+
+---
+
+## 23. Parser and Transformation Test Matrix
+
+Maintain a table for every tested endpoint.
+
+| Input channel | Parser | Nested support | Dangerous-key behavior | Transformation | Result |
+|---|---|---|---|---|---|
+| Query | Unknown | Unknown | Unknown | Unknown | Untested |
+| JSON | JSON parser | Yes | Own property possible | Unknown | Untested |
+| Form | Unknown | Unknown | Unknown | Unknown | Untested |
+| Multipart | Unknown | Unknown | Unknown | Unknown | Untested |
+| Fragment | Client code | Application-dependent | Application-dependent | Unknown | Untested |
+| postMessage | Browser messaging | Object data | Application-dependent | Unknown | Untested |
+| WebSocket | Application parser | Application-dependent | Application-dependent | Unknown | Untested |
+| File import | File parser | Format-dependent | Parser-dependent | Unknown | Untested |
+
+Do not fill in a result without observing it.
+
+---
+
+# PART IV — CLIENT-SIDE DETECTION
+
+## 24. Client-Side Attack Surface Discovery
+
+Start by identifying where the application converts external input into JavaScript objects.
+
+High-value locations:
+
+- Search pages.
+- Filter interfaces.
+- Profile settings.
+- Dashboard configuration.
+- Analytics interfaces.
+- Third-party integrations.
+- Client-side routers.
+- Embedded widgets.
+- Import/export functionality.
+- State restoration.
+- Web messaging.
+
+Record the source URL, page, JavaScript bundle, and triggering action.
+
+---
+
+## 25. Source Discovery
+
+Search JavaScript bundles and source maps for:
+
+```javascript
+location.search
+location.hash
+URLSearchParams
+window.location
+postMessage
+addEventListener("message"
+JSON.parse
+localStorage
+sessionStorage
+```
+
+Also search for:
+
+```javascript
+Object.assign
+Object.create
+merge
+defaultsDeep
+set
+unset
+omit
+extend
+cloneDeep
+```
+
+These searches are only reconnaissance.
+
+A source and a sink must be connected through data flow before a vulnerability can be established.
+
+---
+
+## 26. URL-Based Testing
+
+Recommended process:
+
+1. Open the page normally.
+2. Record its baseline behavior.
+3. Identify parameters read by JavaScript.
+4. Determine how parameters are parsed.
+5. Introduce a harmless unique canary property through an authorized test input.
+6. Check whether the canary is inherited.
+7. Identify the affected prototype.
+8. Reload the page to establish a clean baseline.
+9. Repeat to confirm reproducibility.
+
+Test each parameter independently before combining them.
+
+This makes it easier to identify which input path causes the behavior.
+
+---
+
+## 27. Hash-Based Testing
+
+Investigate applications that parse the fragment into configuration objects.
+
+Useful code locations:
+
+```javascript
+location.hash
+window.location.hash
+```
+
+Follow the value into:
+
+- Router state.
+- Query-like parsers.
+- Configuration objects.
+- Dynamic property assignment.
+- Recursive merge operations.
+
+Do not treat a hash containing a dangerous string as proof of pollution.
+
+---
+
+## 28. Web Messaging Testing
+
+For every relevant message handler:
+
+1. Identify the receiving window.
+2. Understand the expected sender.
+3. Review origin validation.
+4. Review message schema validation.
+5. Trace the data after receipt.
+6. Identify merge and assignment operations.
+7. Determine whether the resulting properties are inherited.
+8. Test only within authorized browser contexts.
+
+A message handler may accept valid data but still process dangerous property names unsafely.
+
+---
+
+## 29. Browser Console Verification
+
+Use a unique canary name that is unlikely to conflict with application properties.
+
+For example:
+
+```javascript
+const marker = "pp_research_marker_7f91";
+```
+
+After delivering an authorized test input, inspect the relevant prototype.
+
+For an `Object.prototype` test:
+
+```javascript
+Object.prototype.pp_research_marker_7f91;
+```
+
+Create a fresh object:
+
+```javascript
+const fresh = {};
+
+fresh.pp_research_marker_7f91;
+```
+
+Check ownership:
+
+```javascript
+Object.hasOwn(
+    fresh,
+    "pp_research_marker_7f91"
+);
+```
+
+Inspect the prototype:
+
+```javascript
+Object.getPrototypeOf(fresh);
+```
+
+### 29.1 Expected Interpretation
+
+| Observation | Interpretation |
+|---|---|
+| Property absent everywhere | No pollution demonstrated |
+| Property exists only on submitted object | Reflection or own-property assignment |
+| Property appears on fresh object through inheritance | Potential prototype modification |
+| Property appears on `Object.prototype` | Object prototype pollution demonstrated |
+| Property appears on custom prototype | Custom prototype modification demonstrated |
+
+### 29.2 Important Limitations
+
+- A marker may already exist.
+- A different frame may have a different JavaScript realm.
+- The application may use custom prototypes.
+- A source may execute asynchronously.
+- The test may be delivered after the relevant code has already run.
+- A browser reload generally creates a fresh page execution context, but not necessarily a fresh server-side process.
+
+Use a fresh marker and repeat the test.
+
+---
+
+## 30. DOM Invader Methodology
+
+DOM Invader is particularly useful for client-side prototype pollution research.
+
+Its prototype pollution features can help identify:
+
+- URL-based sources.
+- Hash-based sources.
+- JSON objects sent through web messages.
+- Alternative source techniques.
+- Potential gadgets.
+- Proof-of-concept flows.
+
+### 30.1 Recommended Workflow
+
+1. Open the target using Burp's built-in browser.
+2. Enable DOM Invader.
+3. Enable prototype pollution attack types.
+4. Reload the target.
+5. Inspect discovered sources.
+6. Generate a controlled proof of concept.
+7. Verify the pollution in the browser.
+8. Scan for gadgets.
+9. Inspect the relevant source-to-sink path.
+10. Validate the actual impact.
+
+DOM Invader can accelerate discovery, but automated results still require manual validation.
+
+Do not assume that a detected source automatically proves exploitable impact.
+
+---
+
+## 31. Client-Side Gadget Discovery
+
+A gadget is existing application code that consumes a polluted property.
+
+Search for property reads that may obtain values from prototypes.
+
+Example conceptual pattern:
+
+```javascript
+const config = {};
+
+if (config.someOption) {
+    performSensitiveOperation(config.someOption);
+}
+```
+
+If `someOption` is not an own property, JavaScript may retrieve an inherited value.
+
+Investigate:
+
+- Default configuration.
+- Optional properties.
+- Feature flags.
+- URL construction.
+- DOM element attributes.
+- Script-loading configuration.
+- HTML rendering.
+- Sanitizer configuration.
+- Navigation logic.
+
+### 31.1 Questions for Every Gadget
+
+- Does the code read the property?
+- Is the property normally undefined?
+- Can the attacker influence the inherited value?
+- Is the relevant code path reachable?
+- Does the value reach a sensitive operation?
+- Is there a sanitizer?
+- Does the sanitizer itself rely on inherited configuration?
+- Does the property need a particular type?
+- Is user interaction required?
+
+---
+
+## 32. DOM XSS and Other Impact Analysis
+
+Potential DOM sinks include:
+
+```javascript
+innerHTML
+outerHTML
+insertAdjacentHTML
+document.write
+srcdoc
+```
+
+Potential navigation or URL-related sinks include:
+
+```javascript
+location.href
+window.open
+element.href
+element.src
+element.action
+```
+
+Potential script-loading behavior includes dynamically created script elements whose source is derived from configuration.
+
+These are investigation targets, not proof of exploitation.
+
+### 32.1 Safe Validation
+
+Prefer a controlled proof that demonstrates data reaching the relevant sink without executing arbitrary code.
+
+For example:
+
+- A harmless DOM marker.
+- A controlled URL value.
+- A non-executable HTML marker in a test environment.
+- A local test page.
+- A developer-approved test callback.
+
+Only demonstrate executable impact where explicitly authorized and where the test environment and program rules permit it.
+
+---
+
+## 33. Third-Party JavaScript and Dependency Analysis
+
+A vulnerability may originate in a dependency rather than application-owned code.
+
+Review:
+
+- Bundled JavaScript.
+- Source maps.
+- Package names.
+- Version strings.
+- Dependency lockfiles where available.
+- Known gadget databases.
+- Historical advisories.
+- Patch commits.
+
+The BlackFan client-side prototype pollution repository is a useful starting point for library-specific gadget research.
+
+However, a gadget documented for one version may not exist in another version.
+
+---
+
+# PART V — SERVER-SIDE DETECTION
+
+## 34. Server-Side Prototype Pollution
+
+Server-side prototype pollution presents additional challenges.
+
+In a browser, a tester can inspect JavaScript objects directly.
+
+On a remote server, the tester normally cannot inspect the server's `Object.prototype`.
+
+Instead, detection relies on observable behavior.
+
+The key challenge is that pollution can persist for the lifetime of a process.
+
+A harmful test may therefore affect requests other than the one used to trigger it.
+
+Always prioritize non-destructive methods.
+
+---
+
+## 35. Black-Box Detection Strategy
+
+Use this sequence:
+
+```text
+1. Identify Node.js or another JavaScript server runtime
+2. Identify object-processing endpoints
+3. Identify possible input parsers
+4. Identify potential merge/assignment behavior
+5. Establish a baseline response
+6. Send a harmless test input
+7. Send a follow-up request
+8. Compare observable behavior
+9. Repeat under controlled conditions
+10. Determine scope and persistence
+```
+
+### 35.1 High-Value Endpoints
+
+- Profile updates.
+- User preferences.
+- Configuration endpoints.
+- Search and filter APIs.
+- Import endpoints.
+- Export endpoints.
+- Administrative settings.
+- API options.
+- Template rendering.
+- Data transformation endpoints.
+
+### 35.2 Indicators of a Potential Sink
+
+- Deeply nested input is accepted.
+- Arbitrary keys are preserved.
+- The application merges request data into defaults.
+- Configuration objects are built dynamically.
+- Utility libraries perform recursive merges.
+- The same data is reused across requests.
+
+These are indicators, not proof.
+
+---
+
+## 36. Non-Destructive Behavioral Oracles
+
+A behavioral oracle is an externally observable change that suggests a server-side property has been polluted.
+
+PortSwigger's research describes techniques that use subtle response changes rather than deliberately causing a denial of service.
+
+The most useful principle is to select properties that affect an observable but relatively harmless behavior.
+
+### 36.1 JSON Formatting Oracle
+
+Some Express versions and configurations historically used an inherited `json spaces` property when formatting JSON responses.
+
+A controlled test can compare:
+
+- Baseline JSON response.
+- Response after a candidate pollution input.
+- Subsequent JSON response formatting.
+
+A change in indentation may indicate that an inherited configuration property is being consumed.
+
+This is version- and implementation-dependent.
+
+Do not assume every Express deployment exposes this behavior.
+
+### 36.2 Status-Related Oracle
+
+Some framework error-handling paths may read inherited status-related properties.
+
+A changed response status may indicate an inherited property is being used.
+
+However:
+
+- Do not deliberately cause service disruption.
+- Do not test unusual or invalid status values on production systems.
+- Confirm the framework's exact behavior.
+- Rule out ordinary error handling and middleware changes.
+
+### 36.3 Content-Type and Charset Oracle
+
+Historical body-parser and Node.js interactions can expose inherited properties related to content-type handling.
+
+The PortSwigger technique involves a `content-type` property and its interaction with incoming request header handling.
+
+It is not equivalent to blindly setting a generic `charset` property.
+
+Before testing:
+
+1. Identify the middleware and version.
+2. Understand the relevant header-processing code.
+3. Confirm the expected behavior in a local lab.
+4. Use only a harmless, supported test value.
+5. Compare the baseline and subsequent responses.
+
+### 36.4 Other Candidate Oracles
+
+Potential framework-dependent signals include:
+
+- Changes in response headers.
+- Different JSON serialization.
+- Changes in parsing behavior.
+- New inherited properties in response objects.
+- Unexpected configuration defaults.
+
+Do not assume that a particular property is a universal oracle.
+
+The oracle must be supported by the target's implementation.
+
+---
+
+## 37. Differential Response Testing
+
+Use a controlled three-request sequence.
+
+### Request A — Baseline
+
+Send an ordinary request.
+
+Record:
+
+- HTTP status.
+- Response headers.
+- Response body.
+- Content type.
+- JSON formatting.
+- Response length.
+- Timing.
+- Relevant application behavior.
+
+### Request B — Candidate Test
+
+Send the authorized, non-destructive candidate input.
+
+Record the same information.
+
+### Request C — Follow-Up
+
+Send the original baseline request again.
+
+Compare Request A and Request C.
+
+### Interpretation
+
+| Result | Interpretation |
+|---|---|
+| A and C identical | No observable effect |
+| A and C differ once | Inconclusive |
+| A and C differ reproducibly in the predicted way | Stronger evidence |
+| Behavior changes only for one session | Possible session-local state |
+| Behavior changes across unrelated requests | Possible shared process state |
+| Behavior changes inconsistently | Investigate caching and load balancing |
+
+A response difference is not sufficient by itself.
+
+You must connect the difference to the expected prototype behavior.
+
+---
+
+## 38. Persistence and Worker Scope
+
+After a server-side test, investigate how long the effect persists.
+
+Possible scopes:
+
+1. Current request.
+2. Current session.
+3. Subsequent requests handled by the same worker.
+4. Other requests handled by a shared process.
+5. Multiple workers.
+6. Entire application instance.
+7. Multiple application instances.
+
+### 38.1 Questions
+
+- Does the behavior persist across requests?
+- Does it affect only one worker?
+- Does a process restart clear the behavior?
+- Does a load balancer route the follow-up request elsewhere?
+- Does the application use clustering?
+- Does the application run multiple containers?
+- Is the state isolated by worker or process?
+
+### 38.2 Important Testing Limitation
+
+If requests are distributed across workers, inconsistent results do not necessarily disprove pollution.
+
+The follow-up request may reach a different worker.
+
+Do not attempt disruptive worker manipulation to prove persistence.
+
+Document the uncertainty.
+
+---
+
+## 39. Framework-Specific Investigation
+
+### Express
+
+Review:
+
+- Request parsing middleware.
+- Body parser configuration.
+- Error-handling paths.
+- JSON serialization.
+- Response construction.
+- Options merging.
+- Framework version.
+
+### Fastify
+
+Review:
+
+- Schema validation.
+- Request serialization.
+- Plugin configuration.
+- Custom decorators.
+- Object merging.
+- User-controlled options.
+
+### Koa
+
+Review:
+
+- Context construction.
+- Middleware options.
+- Request parsing.
+- Response configuration.
+- Custom object transformations.
+
+### Custom Node.js Applications
+
+Prioritize:
+
+- Recursive merge helpers.
+- Request normalization.
+- Shared configuration objects.
+- Child process creation.
+- Template rendering.
+- Dynamic module loading.
+- Serialization.
+
+Do not assume that the framework alone is vulnerable.
+
+The application code and dependency versions determine the actual behavior.
+
+---
+
+## 40. Server-Side False Positives
+
+Common explanations for apparent pollution include:
+
+- Caching.
+- Session state.
+- Load balancing.
+- Worker distribution.
+- Middleware differences.
+- Application feature flags.
+- Randomized responses.
+- Rate limiting.
+- Request-specific configuration.
+- Error-handling behavior.
+- Reflection of submitted data.
+- Normal inherited properties.
+
+A reliable finding requires repeatable behavior that matches the predicted mechanism.
+
+---
+
+## 41. Safe Server-Side Confirmation
+
+Before testing a live application:
+
+- Confirm explicit authorization.
+- Review the bug bounty program's testing rules.
+- Avoid dangerous global configuration changes.
+- Avoid payloads that could launch processes.
+- Avoid destructive property changes.
+- Avoid persistent state manipulation.
+- Prefer local reproduction where possible.
+- Use a unique canary.
+- Stop if unrelated application behavior changes.
+
+A production system should never be treated as a disposable laboratory.
+
+---
+
+# PART VI — GADGET DISCOVERY AND EXPLOITABILITY
+
+## 42. What Is a Gadget?
+
+A gadget is an existing piece of code that reads a property influenced by prototype pollution.
+
+The gadget may be completely legitimate when used normally.
+
+It becomes relevant because the application reads a property that the attacker can control through inheritance.
+
+Example:
+
+```javascript
+function createConfig(options) {
+    const config = {};
+
+    if (options.useCustomHandler) {
+        config.handler = options.handler;
+    }
+
+    return config;
+}
+```
+
+If the application reads inherited properties without validating ownership, an attacker may influence the resulting configuration.
+
+This is a conceptual example, not a complete exploit.
+
+---
+
+## 43. Gadget Discovery Methodology
+
+Use a systematic approach.
+
+### Step 1 — Identify the polluted property
+
+Record:
+
+- Property name.
+- Prototype target.
+- Expected type.
+- Value constraints.
+
+### Step 2 — Search for property reads
+
+Search application code and dependencies for the property name.
+
+Look for:
+
+- Direct property access.
+- Destructuring.
+- Default parameters.
+- Configuration merging.
+- Conditional checks.
+- Serialization.
+- Template options.
+
+### Step 3 — Check ownership assumptions
+
+Does the code use:
+
+```javascript
+Object.hasOwn(object, property)
+```
+
+or does it simply read:
+
+```javascript
+object[property]
+```
+
+The latter may retrieve an inherited value.
+
+### Step 4 — Identify the sensitive operation
+
+Determine whether the property influences:
+
+- HTML rendering.
+- URL navigation.
+- Script loading.
+- File handling.
+- Process execution.
+- Authentication.
+- Authorization.
+- Template compilation.
+- Response generation.
+
+### Step 5 — Establish reachability
+
+Confirm that normal application behavior reaches the relevant code.
+
+### Step 6 — Establish controllability
+
+Confirm that the attacker can influence the exact property and type required.
+
+### Step 7 — Validate safely
+
+Use a non-executable marker or a controlled local reproduction where possible.
+
+---
+
+## 44. Client-Side Gadget Categories
+
+### DOM Rendering
+
+Properties used in:
+
+- HTML construction.
+- Element creation.
+- Attribute assignment.
+- Template rendering.
+
+### URL Handling
+
+Properties used in:
+
+- Redirect destinations.
+- Link generation.
+- Script URLs.
+- Resource URLs.
+- Navigation options.
+
+### Script Loading
+
+Configuration properties that control dynamically loaded scripts.
+
+### Sanitizer Configuration
+
+Properties that influence:
+
+- Allowed tags.
+- Allowed attributes.
+- URI protocols.
+- Sanitization options.
+
+### Application Logic
+
+Properties used in:
+
+- Feature flags.
+- Conditional checks.
+- Access-control logic.
+- UI visibility.
+- Role-based rendering.
+
+### Event Handling
+
+Properties used in:
+
+- Event configuration.
+- Callback selection.
+- Dynamic handler registration.
+
+---
+
+## 45. Server-Side Gadget Categories
+
+### Configuration Gadgets
+
+A polluted property is consumed while constructing application or framework configuration.
+
+### Serialization Gadgets
+
+A property influences serialization options or response generation.
+
+### Template Gadgets
+
+A property influences template rendering or compilation.
+
+### Process Creation Gadgets
+
+A property influences process environment or launch configuration.
+
+### Filesystem Gadgets
+
+A property influences path selection or file operation options.
+
+### Authentication and Authorization Gadgets
+
+A property influences security decisions.
+
+### Error Handling Gadgets
+
+A property changes exception handling or response construction.
+
+### Request Handling Gadgets
+
+A property influences parsing, routing, or request processing.
+
+---
+
+## 46. Configuration and Options Gadgets
+
+Configuration objects deserve particular attention.
+
+Typical pattern:
+
+```javascript
+const options = merge(
+    defaultOptions,
+    userOptions
+);
+```
+
+Investigate:
+
+- Whether the options object has a normal prototype.
+- Whether inherited properties are read.
+- Whether the merge is recursive.
+- Whether the options are reused.
+- Whether the resulting configuration reaches a sensitive function.
+
+A polluted property may be consumed much later than the original request.
+
+---
+
+## 47. Authentication and Authorization Gadgets
+
+Review code that checks properties such as:
+
+- `isAdmin`.
+- `isAuthenticated`.
+- `authorized`.
+- `role`.
+- `permissions`.
+- `verified`.
+- `trusted`.
+
+A property name is not a vulnerability by itself.
+
+Determine whether:
+
+1. The security decision reads an inherited value.
+2. The attacker can influence that value.
+3. The check is reachable.
+4. The application actually grants access as a result.
+
+A safe assessment should use a test account and a controlled resource.
+
+Never test access to unrelated users' data.
+
+---
+
+## 48. Template and Serialization Gadgets
+
+Template engines may consume configuration properties during rendering or compilation.
+
+Examples worth auditing:
+
+- EJS.
+- Pug.
+- Handlebars.
+- Nunjucks.
+- Other server-side rendering frameworks.
+
+For each dependency, record:
+
+- Exact package name.
+- Exact version.
+- Relevant API.
+- Relevant option.
+- Source code path.
+- Known advisory.
+- Required preconditions.
+- Patch status.
+
+Do not claim template-engine RCE merely because a template package is installed.
+
+---
+
+## 49. Child Process and Environment Gadgets
+
+Node.js child-process functionality deserves special attention.
+
+Relevant APIs include:
+
+```javascript
+child_process.spawn()
+child_process.exec()
+child_process.execFile()
+child_process.fork()
+```
+
+Investigate:
+
+- Whether user-controlled configuration reaches the options object.
+- Whether the application launches a child process.
+- How the environment is constructed.
+- Whether inherited properties are enumerated.
+- Whether the environment or command options are attacker-controlled.
+- Which Node.js version is running.
+- Which operating system is used.
+
+### 49.1 Environment Enumeration
+
+Some process-launch implementations enumerate environment objects in ways that can include inherited enumerable properties.
+
+This can create a bridge between prototype pollution and process configuration.
+
+However, the existence of `child_process` in a dependency tree does not establish a usable gadget.
+
+The exact process-launch path and environment construction must be examined.
+
+---
+
+## 50. Prototype Pollution to RCE: Research Model
+
+RCE is an advanced impact category, not the default result of prototype pollution.
+
+A conceptual chain is:
+
+```text
+Attacker-controlled input
+          |
+          v
+Prototype pollution
+          |
+          v
+Polluted configuration property
+          |
+          v
+Child-process or template gadget
+          |
+          v
+Sensitive process option
+          |
+          v
+Code execution
+```
+
+Node.js research has documented chains involving process-launch options and `NODE_OPTIONS`.
+
+A filesystem-less import technique has also been researched using Node.js command-line options and data URLs.
+
+### 50.1 Conditions That Must Be Established
+
+- A remotely reachable pollution source exists.
+- The relevant property can be polluted.
+- The property reaches the expected prototype.
+- A process-launch or other execution gadget exists.
+- The relevant option is consumed.
+- The runtime accepts the required option.
+- The process-launch path is reachable.
+- Environment and operating-system constraints permit the behavior.
+
+### 50.2 Do Not Confuse a Theoretical Chain With a Finding
+
+The following do not independently establish RCE:
+
+- Finding `NODE_OPTIONS` in source code.
+- Finding `child_process` in dependencies.
+- Finding an unsafe merge.
+- Finding an old RCE payload online.
+- Finding a vulnerable template package.
+- Seeing a property appear on `Object.prototype`.
+
+RCE must be demonstrated through a controlled, authorized proof of the complete chain.
+
+For live bug bounty targets, avoid arbitrary command execution. Use an approved non-destructive verification method or a local reproduction.
+
+---
+
+## 51. Why a Gadget Does Not Automatically Mean RCE
+
+A gadget may only affect:
+
+- A UI label.
+- A response format.
+- A navigation option.
+- A template variable.
+- A configuration default.
+
+The actual impact depends on the operation consuming the property.
+
+Use evidence-based language:
+
+- "Prototype pollution confirmed."
+- "A configuration gadget was identified."
+- "The gadget influences response generation."
+- "DOM XSS was demonstrated."
+- "RCE was demonstrated."
+
+Do not use the last statement unless code execution was actually verified.
+
+---
+
+# PART VII — ADVANCED TESTING
+
+## 52. Dangerous-Key Filtering Analysis
+
+When an application filters dangerous keys, investigate where the filtering occurs.
+
+Possible filtering locations:
+
+- Input validation.
+- Parser configuration.
+- Schema validation.
+- Recursive merge.
+- Path assignment.
+- Object cloning.
+- Database serialization.
+- Background-job processing.
+
+A filter at one stage does not guarantee that every later transformation is safe.
+
+### 52.1 Questions
+
+- Are keys normalized before filtering?
+- Are nested keys checked?
+- Are array path segments checked?
+- Are encoded keys decoded before filtering?
+- Is filtering case-sensitive?
+- Are duplicate keys handled consistently?
+- Are custom prototypes considered?
+- Is the destination object safe?
+
+The goal is to understand the complete validation boundary, not merely to bypass a keyword filter.
+
+---
+
+## 53. Alternative Property Paths
+
+When reviewing a suspected vulnerable path, consider how the implementation handles:
+
+- `__proto__`.
+- `constructor`.
+- `prototype`.
+- Nested object paths.
+- Array-based paths.
+- Dot-separated paths.
+- Bracket-separated paths.
+- Encoded keys.
+- Repeated path components.
+
+These are testing dimensions.
+
+Do not assume every alternative path is accepted by the parser or reaches the same sink.
+
+---
+
+## 54. Nested Object and Array Behavior
+
+Arrays are objects in JavaScript.
+
+This matters because a merge function may process arrays differently from ordinary objects.
+
+Investigate:
+
+- Array indices.
+- Array extension.
+- Nested arrays.
+- Arrays of objects.
+- Array-to-object conversion.
+- Object-to-array conversion.
+- Array path segments.
+- Inherited array properties.
+
+Do not assume an array-based input is safe simply because the original object parser treats arrays differently.
+
+---
+
+## 55. Second-Order Prototype Pollution
+
+Second-order pollution occurs when the initial input is stored and processed later.
+
+Example:
+
+```text
+Initial request
+      |
+      v
+Database or queue
+      |
+      v
+Background worker
+      |
+      v
+Object transformation
+      |
+      v
+Potential prototype modification
+      |
+      v
+Later application behavior
+```
+
+Potential locations:
+
+- Background jobs.
+- Scheduled tasks.
+- Export pipelines.
+- Import pipelines.
+- Stored preferences.
+- Delayed configuration updates.
+- Data synchronization.
+- Report generation.
+
+The first request may appear harmless because the dangerous transformation happens later.
+
+---
+
+## 56. Multi-Stage and Multi-Parameter Testing
+
+Some applications build objects through multiple processing stages.
+
+For example:
+
+```text
+Query parameters
+       |
+       v
+Request options
+       |
+       v
+Default configuration merge
+       |
+       v
+Plugin configuration merge
+       |
+       v
+Final application options
+```
+
+Investigate each transformation separately.
+
+When multiple inputs are involved:
+
+1. Test each independently.
+2. Identify which transformation changes the object.
+3. Determine whether order matters.
+4. Determine whether one input overwrites another.
+5. Avoid combining variables before understanding individual behavior.
+
+---
+
+## 57. Custom Prototype Pollution
+
+A vulnerability may affect a prototype other than `Object.prototype`.
+
+Example:
+
+```javascript
+class Settings {
+    constructor() {
+        this.enabled = true;
+    }
+}
+
+const settings = new Settings();
+```
+
+The object inherits from `Settings.prototype`.
+
+A custom prototype vulnerability may affect only instances of a particular class.
+
+For this reason, verification should inspect:
+
+```javascript
+Object.getPrototypeOf(settings);
+```
+
+Do not use an `Object.prototype` check as the only confirmation mechanism.
+
+---
+
+## 58. Prototype Freezing and Runtime Defenses
+
+A defensive application may freeze prototypes.
+
+Example:
+
+```javascript
+Object.freeze(Object.prototype);
+```
+
+This can reduce the effect of some prototype modifications.
+
+It is not a complete solution.
+
+Consider:
+
+- Other built-in prototypes.
+- Custom class prototypes.
+- Unsafe destination objects.
+- Application-specific merge behavior.
+- Existing pollution before freezing.
+- Compatibility with dependencies.
+
+Node.js also supports runtime controls such as:
+
+```text
+--disable-proto=delete
+```
+
+This changes the availability of the legacy `__proto__` accessor.
+
+It does not eliminate all prototype pollution paths, particularly those involving other property paths or unsafe application logic.
+
+---
+
+## 59. Race Conditions and Concurrent Requests
+
+Server-side applications may process multiple requests concurrently.
+
+Investigate whether:
+
+- The polluted property is global to the worker.
+- Requests share configuration objects.
+- Asynchronous tasks reuse the same objects.
+- Cleanup is incomplete.
+- A background task consumes a polluted value later.
+
+Do not deliberately create a disruptive race condition on a production system.
+
+Use local reproduction for complex concurrency testing.
+
+---
+
+## 60. Caching, Load Balancing, and Distributed Workers
+
+A result may vary because the application uses:
+
+- Multiple Node.js workers.
+- Multiple containers.
+- Serverless instances.
+- Reverse proxies.
+- Sticky sessions.
+- Distributed caches.
+
+Record the consistency of the behavior.
+
+A negative follow-up request may have reached a clean worker.
+
+A positive follow-up request may have reached a polluted worker.
+
+Do not overstate process-wide persistence unless the evidence supports it.
+
+---
+
+# PART VIII — AUTOMATION AND TOOLS
+
+## 61. Burp Suite and DOM Invader
+
+Recommended primary tool for client-side testing:
+
+**Burp Suite Professional with DOM Invader**
+
+Use it for:
+
+- Identifying client-side sources.
+- Testing URL and hash inputs.
+- Investigating web-message sources.
+- Detecting candidate gadgets.
+- Building controlled proof-of-concept flows.
+
+Use the built-in browser when relying on DOM Invader instrumentation.
+
+---
+
+## 62. Manual Burp Repeater Workflow
+
+For server-side testing:
+
+1. Identify an endpoint that accepts structured input.
+2. Capture a baseline request.
+3. Send it to Repeater.
+4. Record the response.
+5. Modify only one input dimension.
+6. Use a harmless test marker or version-appropriate oracle.
+7. Send the follow-up request.
+8. Compare responses.
+9. Repeat under controlled conditions.
+10. Record all observations.
+
+Maintain separate Repeater tabs for:
+
+- Baseline.
+- Candidate source.
+- Follow-up request.
+- Control request.
+- Alternative content type.
+- Cleanup or recovery procedure.
+
+Do not run broad payload lists against production systems without considering persistence and service impact.
+
+---
+
+## 63. Browser Developer Tools
+
+Useful capabilities:
+
+- Console inspection.
+- Breakpoints.
+- Call stack inspection.
+- Network request inspection.
+- Local storage inspection.
+- Event listener inspection.
+- Source map inspection.
+- Heap and object inspection.
+
+Use breakpoints to follow a value from source to transformation to sink.
+
+---
+
+## 64. JavaScript Source Auditing
+
+Search for likely sources:
+
+```text
+location.search
+location.hash
+URLSearchParams
+postMessage
+JSON.parse
+localStorage
+sessionStorage
+```
+
+Search for likely sinks and transformations:
+
+```text
+Object.assign
+Object.create
+merge
+mergeWith
+defaultsDeep
+set
+unset
+omit
+extend
+cloneDeep
+```
+
+Search for gadget-related operations:
+
+```text
+innerHTML
+outerHTML
+insertAdjacentHTML
+document.write
+window.open
+location.href
+spawn
+exec
+fork
+compile
+render
+```
+
+These searches help prioritize code review.
+
+They do not replace tracing actual data flow.
+
+---
+
+## 65. Dependency and SBOM Analysis
+
+For Node.js projects, review:
+
+```text
+package.json
+package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+pnpm-lock.yaml
+```
+
+Record:
+
+- Direct dependencies.
+- Transitive dependencies.
+- Exact installed versions.
+- Duplicate versions.
+- Package aliases.
+- Standalone utility packages.
+- Bundled copies.
+- Patch status.
+
+A dependency may be vulnerable even when the top-level package version looks safe because another copy is bundled or installed transitively.
+
+---
+
+## 66. Static Analysis and Grep-Based Hunting
+
+Useful search targets include:
+
+- Dynamic property assignment.
+- Recursive merge helpers.
+- User-controlled paths.
+- Configuration construction.
+- Unsafe object cloning.
+- Deserialization.
+- Template options.
+- Process creation.
+
+When reviewing code, trace values rather than simply counting matches.
+
+A useful finding should explain:
+
+```text
+Untrusted input
+    |
+    v
+Parser
+    |
+    v
+Transformation
+    |
+    v
+Unsafe property operation
+    |
+    v
+Prototype target
+    |
+    v
+Application behavior
+```
+
+---
+
+## 67. Dynamic Analysis and Fuzzing
+
+Fuzzing can help discover unusual parser and transformation behavior.
+
+Useful dimensions:
+
+- Property names.
+- Nested depth.
+- Arrays.
+- Empty values.
+- Null values.
+- Primitive values.
+- Repeated keys.
+- Encoded keys.
+- Different content types.
+- Duplicate parameters.
+- String versus array path representation.
+
+### 67.1 Fuzzing Principles
+
+- Use a controlled test environment.
+- Start with a small input set.
+- Change one variable at a time.
+- Use unique canary names.
+- Avoid destructive property names and values.
+- Monitor application stability.
+- Preserve request/response pairs.
+- Reproduce interesting results manually.
+
+Fuzzing output should be treated as a candidate list.
+
+---
+
+## 68. Automated Scanner Limitations
+
+A scanner may detect:
+
+- Dangerous strings.
+- Suspicious parameters.
+- Candidate sources.
+- Known vulnerable package versions.
+- Known gadgets.
+
+It may fail to determine:
+
+- Whether a merge actually changes a prototype.
+- Whether the relevant code path is reachable.
+- Whether the target prototype is shared.
+- Whether a gadget consumes the property.
+- Whether impact is achievable.
+- Whether a result is caused by caching or session state.
+
+Automated detection is useful for prioritization, not final confirmation.
+
+---
+
+## 69. Building a Reproducible Testing Harness
+
+A local harness should contain:
+
+1. A vulnerable example.
+2. A patched example.
+3. Multiple parsers.
+4. Different merge implementations.
+5. Own-property checks.
+6. Prototype inspection.
+7. Canary verification.
+8. Reset procedures.
+9. Test logs.
+10. Version metadata.
+
+Record the runtime version and dependency versions for every experiment.
+
+The objective is to reproduce the behavior independently of the target.
+
+---
+
+# PART IX — VALIDATION AND REPORTING
+
+## 70. Evidence Requirements
+
+A strong finding should contain:
+
+- Affected endpoint.
+- HTTP method.
+- Content type.
+- Input location.
+- Parser or transformation, if known.
+- Unique canary.
+- Baseline behavior.
+- Test behavior.
+- Follow-up behavior.
+- Affected prototype.
+- Own versus inherited property result.
+- Persistence scope.
+- Gadget, if identified.
+- Demonstrated impact.
+- Relevant package and runtime versions.
+- Limitations and prerequisites.
+
+Do not claim information that was not actually observed.
+
+---
+
+## 71. False Positives
+
+Common false positives include:
+
+### Dangerous String Reflection
+
+The application returns `__proto__` in a response.
+
+This does not prove pollution.
+
+### JSON Parsing
+
+The application accepts JSON containing `__proto__`.
+
+This does not prove pollution.
+
+### Own Property Assignment
+
+The submitted object contains the canary as an own property.
+
+This does not prove prototype modification.
+
+### Vulnerable Dependency Name
+
+A dependency has a historical advisory.
+
+This does not prove that the vulnerable function is reachable.
+
+### Merge Function Discovery
+
+A recursive merge exists.
+
+This does not prove that dangerous keys reach it.
+
+### Gadget Discovery
+
+A gadget exists.
+
+This does not prove that an attacker can influence it.
+
+### Response Difference
+
+A response changes after testing.
+
+This does not prove pollution without a reliable causal connection.
+
+### Historical Payload
+
+A payload worked against an older package.
+
+This does not establish that the current deployment is vulnerable.
+
+---
+
+## 72. Impact Classification
+
+| Demonstrated result | Reporting description |
+|---|---|
+| Suspicious input accepted | Candidate source |
+| Unsafe merge identified | Potential vulnerability |
+| Prototype modification verified | Confirmed prototype pollution |
+| Shared application behavior affected | Confirmed behavioral consequence |
+| Security control bypass demonstrated | Confirmed security impact |
+| DOM XSS demonstrated | Client-side exploit impact |
+| Application disruption demonstrated | Availability impact |
+| RCE demonstrated | Critical execution impact, subject to program context |
+
+Severity should reflect the actual demonstrated impact and the attack prerequisites.
+
+Do not automatically classify every prototype pollution issue as critical.
+
+Do not automatically dismiss a confirmed issue merely because a gadget has not yet been found.
+
+---
+
+## 73. Severity Assessment
+
+Consider:
+
+- Attacker privileges required.
+- User interaction required.
+- Input reachability.
+- Prototype affected.
+- Persistence.
+- Number of affected users.
+- Application functionality influenced.
+- Gadget reachability.
+- Confidentiality impact.
+- Integrity impact.
+- Availability impact.
+- Exploit reliability.
+- Environmental prerequisites.
+
+A confirmed pollution vulnerability with no identified impact should be described accurately, with its potential consequences separated from demonstrated ones.
+
+---
+
+## 74. Safe Proof of Concept
+
+A good proof of concept should be:
+
+- Minimal.
+- Reproducible.
+- Non-destructive.
+- Limited to the authorized target.
+- Easy to understand.
+- Supported by evidence.
+- Clear about prerequisites.
+
+For browser-side testing, a unique harmless marker is generally preferable.
+
+For server-side testing, use an oracle supported by the target's implementation and version.
+
+Avoid using:
+
+- Arbitrary command execution.
+- File deletion.
+- Persistent system changes.
+- Account modification.
+- Service disruption.
+- Unapproved external callbacks.
+
+When a stronger impact demonstration is required, use an approved local reproduction or obtain explicit permission for the additional test.
+
+---
+
+## 75. Bug Bounty Reporting
+
+### Suggested Title
+
+Prototype Pollution in [Endpoint / Component] Through [Input Source]
+
+### Suggested Report Structure
+
+**1. Summary**
+
+Describe the input source and affected prototype.
+
+**2. Affected Endpoint**
+
+Include method, path, and relevant content type.
+
+**3. Root Cause**
+
+Explain the parser, transformation, and unsafe operation.
+
+**4. Reproduction Steps**
+
+Provide the minimum steps required to reproduce the behavior.
+
+**5. Evidence**
+
+Include baseline and follow-up observations.
+
+**6. Prototype Verification**
+
+Explain how own versus inherited property behavior was established.
+
+**7. Impact**
+
+Describe only demonstrated impact.
+
+**8. Scope**
+
+State whether the behavior is request-specific, session-specific, or process-persistent, if known.
+
+**9. Prerequisites**
+
+State any required account, interaction, runtime, or deployment conditions.
+
+**10. Remediation**
+
+Recommend safe object handling and validation.
+
+### Example Root Cause Description
+
+"The application accepts nested user-controlled properties and passes the resulting object into a recursive merge operation. The operation does not safely handle prototype-related property paths. This permits an attacker-controlled property to become inherited through the affected prototype."
+
+Use this only when it matches the actual implementation.
+
+---
+
+## 76. Reproducibility Checklist
+
+### Source
+
+- [ ] Input source identified.
+- [ ] Endpoint or browser location documented.
+- [ ] Content type recorded.
+- [ ] Parser identified where possible.
+- [ ] Attacker control established.
+
+### Transformation
+
+- [ ] Object transformation identified.
+- [ ] Merge or assignment operation identified.
+- [ ] Dangerous-key handling reviewed.
+- [ ] Nested behavior tested.
+- [ ] Version recorded.
+
+### Pollution
+
+- [ ] Unique canary used.
+- [ ] Prototype target identified.
+- [ ] Own versus inherited property checked.
+- [ ] Pollution reproduced.
+- [ ] Alternative explanations excluded.
+
+### Scope
+
+- [ ] Persistence investigated.
+- [ ] Worker scope investigated where possible.
+- [ ] Cache and session effects considered.
+- [ ] Reset or cleanup performed.
+
+### Gadget
+
+- [ ] Gadget identified, if any.
+- [ ] Property read confirmed.
+- [ ] Gadget reachability confirmed.
+- [ ] Sensitive sink identified.
+- [ ] Attacker control established.
+
+### Impact
+
+- [ ] Impact demonstrated or clearly marked theoretical.
+- [ ] Prerequisites documented.
+- [ ] Severity justified.
+- [ ] Evidence preserved.
+- [ ] Report does not overstate results.
+
+---
+
+## 77. Testing Worksheet
+
+Use this worksheet for each candidate endpoint.
+
+### Target Information
+
+```text
+Target:
+Endpoint:
+HTTP method:
+Content type:
+Authentication:
+Testing authorization:
+Date:
+Tester:
+```
+
+### Source Analysis
+
+```text
+Input channel:
+Parameter / field:
+Parser:
+Nested object support:
+Dangerous-key behavior:
+Input validation:
+```
+
+### Sink Analysis
+
+```text
+Transformation:
+Merge / assignment function:
+Library:
+Library version:
+Destination object:
+Prototype target:
+```
+
+### Verification
+
+```text
+Baseline result:
+Candidate result:
+Follow-up result:
+Canary:
+Own property:
+Inherited property:
+Prototype inspected:
+Reproducible:
+```
+
+### Gadget Analysis
+
+```text
+Gadget:
+Property consumed:
+Code location:
+Reachable:
+Attacker controllable:
+Sensitive operation:
+```
+
+### Impact
+
+```text
+Demonstrated impact:
+Potential impact:
+Prerequisites:
+Persistence:
+Affected users:
+Severity:
+```
+
+### Cleanup
+
+```text
+Test state reset:
+Session reset:
+Application recovery verified:
+Remaining uncertainty:
+```
+
+---
+
+# PART X — DEFENSE AND REFERENCES
+
+## 78. Prevention and Secure Coding
+
+### 78.1 Reject Dangerous Keys at Object-Processing Boundaries
+
+When processing untrusted object keys, reject or safely handle prototype-related keys.
+
+At minimum, review:
+
+- `__proto__`.
+- `constructor`.
+- `prototype`.
+
+Apply validation recursively and consistently.
+
+A parser-only filter is not sufficient if a later transformation can introduce unsafe property behavior.
+
+### 78.2 Use Null-Prototype Objects for Dictionaries
+
+Example:
+
+```javascript
+const dictionary = Object.create(null);
+```
+
+This creates an object without the ordinary `Object.prototype` inheritance chain.
+
+It is useful for storing arbitrary untrusted keys.
+
+### 78.3 Prefer Map
+
+Example:
+
+```javascript
+const userOptions = new Map();
+
+userOptions.set("theme", "dark");
+userOptions.set("language", "en");
+```
+
+`Map` is generally preferable when the application needs an arbitrary-key collection rather than an ordinary object.
+
+### 78.4 Validate Schemas
+
+Use strict schemas for external input.
+
+Validate:
+
+- Allowed keys.
+- Expected types.
+- Maximum nesting.
+- Array lengths.
+- Required fields.
+- Unknown fields.
+- Path segments.
+
+Reject unexpected fields where appropriate.
+
+### 78.5 Use Maintained Merge Libraries
+
+Review the exact version and implementation.
+
+Do not assume a package is safe because it is popular or because an older vulnerability was patched.
+
+### 78.6 Avoid Unsafe Dynamic Assignment
+
+Do not use untrusted strings directly as property paths without validating every path segment and the destination structure.
+
+### 78.7 Consider Runtime Hardening
+
+Runtime flags and prototype freezing can provide additional protection.
+
+They must be tested for compatibility and should not replace safe input processing.
+
+---
+
+## 79. Remediation Checklist
+
+- [ ] Validate all external object keys.
+- [ ] Reject dangerous property paths.
+- [ ] Validate nested objects recursively.
+- [ ] Use strict input schemas.
+- [ ] Prefer `Map` for arbitrary-key dictionaries.
+- [ ] Use `Object.create(null)` where appropriate.
+- [ ] Replace unsafe merge functions.
+- [ ] Upgrade vulnerable dependencies.
+- [ ] Audit transitive dependencies.
+- [ ] Review template configuration.
+- [ ] Review child-process configuration.
+- [ ] Avoid inherited configuration assumptions.
+- [ ] Use own-property checks where required.
+- [ ] Add regression tests.
+- [ ] Review all input channels.
+- [ ] Monitor dependency advisories.
+
+---
+
+## 80. Developer Review Checklist
+
+When reviewing a JavaScript codebase, ask:
+
+1. Does the application accept arbitrary nested objects?
+2. Does it merge external objects into existing objects?
+3. Does it dynamically assign property names?
+4. Does it accept user-controlled property paths?
+5. Does it use a recursive merge library?
+6. Does it use ordinary objects as arbitrary-key dictionaries?
+7. Does it process JSON, URL-encoded, multipart, or WebSocket input?
+8. Does it parse URL fragments?
+9. Does it accept postMessage data?
+10. Does it store and later transform user-controlled objects?
+11. Does it use configuration objects with inherited defaults?
+12. Does it pass options to template engines?
+13. Does it launch child processes?
+14. Does it serialize objects using inherited options?
+15. Does it validate dangerous keys at every transformation boundary?
+16. Are installed dependencies patched?
+17. Are regression tests present?
+18. Are custom prototypes protected?
+
+---
+
+# 81. RESEARCH RESOURCES
+
+The following references are useful starting points for deeper investigation. Package-specific behavior should always be checked against the exact version deployed.
+
+## Core Concepts and Testing
+
+**PortSwigger — What is Prototype Pollution?**
+
+https://portswigger.net/web-security/prototype-pollution
+
+**PortSwigger — Server-Side Prototype Pollution**
+
+https://portswigger.net/web-security/prototype-pollution/server-side
+
+**PortSwigger Research — Server-Side Prototype Pollution: Black-Box Detection Without the DoS**
+
+https://portswigger.net/research/server-side-prototype-pollution
+
+**OWASP Web Security Testing Guide — Prototype Pollution**
+
+https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Injection/22-Prototype_Pollution
+
+**OWASP Prototype Pollution Prevention Cheat Sheet**
+
+https://cheatsheetseries.owasp.org/cheatsheets/Prototype_Pollution_Prevention_Cheat_Sheet.html
+
+## Browser and Client-Side Testing
+
+**PortSwigger — DOM Invader Prototype Pollution Testing**
+
+https://portswigger.net/burp/documentation/desktop/tools/dom-invader/prototype-pollution
+
+**BlackFan — Client-Side Prototype Pollution Gadgets**
+
+https://github.com/BlackFan/client-side-prototype-pollution
+
+**PortSwigger — Client-Side Prototype Pollution Issue Reference**
+
+https://portswigger.net/kb/issues/00200316_client-side-prototype-pollution
+
+## Advanced Gadget Research
+
+**IEEE Security & Privacy 2025 — Follow My Flow: Unveiling Client-Side Prototype Pollution Gadgets from One Million Real-World Websites**
+
+https://ieeexplore.ieee.org/document/11023488
+
+This research introduces Gala, a technique for discovering client-side gadgets by guiding property injection using values from other websites. The published evaluation reports 133 previously unknown gadgets.
+
+## Node.js and Server-Side Exploitation Research
+
+**PortSwigger — Exploiting Prototype Pollution in Node Without the Filesystem**
+
+https://portswigger.net/research/exploiting-prototype-pollution-in-node-without-the-filesystem
+
+**HackTricks — Prototype Pollution to RCE**
+
+https://hacktricks.wiki/en/pentesting-web/deserialization/nodejs-proto-prototype-pollution/prototype-pollution-to-rce.html
+
+Use these materials to understand the research and prerequisites. Do not assume that a historical technique works on every current Node.js deployment.
+
+## Vulnerability and Dependency References
+
+**MITRE CWE-1321 — Improperly Controlled Modification of Object Prototype Attributes**
+
+https://cwe.mitre.org/data/definitions/1321.html
+
+**Lodash Security Advisories**
+
+https://github.com/lodash/lodash/security/advisories
+
+**CVE-2026-2950 — Lodash Array-Path Bypass**
+
+https://github.com/advisories/GHSA-f23m-r3pf-42rh
+
+The 2026 advisory concerns prototype-property deletion through array-wrapped paths in affected Lodash functions. The full Lodash package advisory identifies 4.18.1 as the patched version. Check the exact package and advisory before deciding whether a deployment is affected.
+
+---
+
+# 82. GLOSSARY
+
+**Prototype:** An object from which another object inherits properties.
+
+**Prototype chain:** The sequence of prototypes JavaScript searches when resolving a property.
+
+**Object.prototype:** The default prototype inherited by most ordinary JavaScript objects.
+
+**Prototype pollution:** Attacker-influenced modification of a prototype's properties.
+
+**Own property:** A property stored directly on an object.
+
+**Inherited property:** A property obtained through the object's prototype chain.
+
+**Source:** The attacker-controlled input location.
+
+**Transformation:** Code that parses, converts, normalizes, or restructures input.
+
+**Sink:** An operation that can modify a prototype or otherwise perform the dangerous property write.
+
+**Gadget:** Existing application code that consumes a polluted property.
+
+**Oracle:** An observable behavior used to infer a hidden condition, such as server-side pollution.
+
+**Canary:** A unique, harmless marker used to verify a test.
+
+**Second-order pollution:** Pollution that occurs later, after an initial input is stored or queued.
+
+**DOM XSS:** Cross-site scripting caused by unsafe client-side DOM operations.
+
+**RCE:** Remote code execution.
+
+**Null-prototype object:** An object created without inheriting from `Object.prototype`.
+
+**Custom prototype:** A prototype associated with an application-defined class or constructor.
+
+---
+
+# FINAL RESEARCH PRINCIPLES
+
+1. A dangerous key is not proof of prototype pollution.
+2. JSON parsing alone does not automatically pollute `Object.prototype`.
+3. Parser behavior must be verified, not assumed.
+4. A vulnerable dependency name is not proof of a reachable vulnerability.
+5. Recursive merge and path-based assignment deserve careful review.
+6. Always distinguish own properties from inherited properties.
+7. Identify the actual prototype affected.
+8. Client-side and server-side detection require different verification methods.
+9. Server-side testing should prioritize non-destructive behavioral oracles.
+10. A confirmed pollution finding and a confirmed exploitation chain are different results.
+11. A gadget must be reachable and attacker-influenced.
+12. RCE requires proof of the complete execution chain.
+13. Version-specific behavior must be checked against the installed implementation.
+14. Reproducibility and causal evidence matter more than the number of payloads tested.
+15. Severity must reflect demonstrated impact.
+16. Always follow the authorization and testing rules of the target.
+17. Preserve a clean baseline and a recovery procedure for every server-side test.
+18. Keep research notes, versions, and evidence for every confirmed result.
+
+**The central rule of prototype pollution research:**
+
+Do not stop when you find a suspicious parameter. Understand how the input becomes an object, how the object is transformed, which prototype is modified, which code consumes the polluted property, and what security consequence can actually be demonstrated.
+
+That is the difference between finding a suspicious input and establishing a reliable security vulnerability.
